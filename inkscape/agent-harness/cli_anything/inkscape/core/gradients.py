@@ -35,7 +35,7 @@ def add_linear_gradient(
     if gradient_units not in ("objectBoundingBox", "userSpaceOnUse"):
         raise ValueError(f"Invalid gradientUnits: {gradient_units}")
 
-    grad_id = generate_id("linearGradient")
+    grad_id = generate_id("linearGradient", project)
     gradient = {
         "id": grad_id,
         "name": name or grad_id,
@@ -83,7 +83,7 @@ def add_radial_gradient(
     if fy is None:
         fy = cy
 
-    grad_id = generate_id("radialGradient")
+    grad_id = generate_id("radialGradient", project)
     gradient = {
         "id": grad_id,
         "name": name or grad_id,

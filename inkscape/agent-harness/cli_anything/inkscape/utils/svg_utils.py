@@ -161,11 +161,27 @@ def update_element_style(element: ET.Element, updates: Dict[str, str]) -> Dict[s
 _id_counter = 0
 
 
-def generate_id(prefix: str = "obj") -> str:
-    """Generate a unique ID for an SVG element."""
+def generate_id(
+    prefix: str = "obj",
+    project: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate an ID not already used by an element in the project.
+
+    The counter is process-local, so it cannot by itself prevent collisions
+    after reopening a document or with the initial layer's fixed ID.
+    SVG IDs share one namespace across objects, layers, and gradients.
+    """
     global _id_counter
-    _id_counter += 1
-    return f"{prefix}{_id_counter}"
+    existing_ids = {
+        item.get("id")
+        for collection in ("objects", "layers", "gradients")
+        for item in (project or {}).get(collection, [])
+    }
+    while True:
+        _id_counter += 1
+        candidate = f"{prefix}{_id_counter}"
+        if candidate not in existing_ids:
+            return candidate
 
 
 def reset_id_counter() -> None:

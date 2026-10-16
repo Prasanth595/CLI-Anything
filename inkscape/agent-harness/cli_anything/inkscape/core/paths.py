@@ -163,7 +163,7 @@ def _path_boolean(
     obj_b = objects[index_b]
 
     # Create a new path object representing the boolean result
-    obj_id = generate_id("path")
+    obj_id = generate_id("path", project)
     result_obj = {
         "id": obj_id,
         "name": name or f"{operation}_{obj_a.get('name', '')}_{obj_b.get('name', '')}",

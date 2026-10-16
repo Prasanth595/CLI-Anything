@@ -76,7 +76,7 @@ def add_text(
     }
     style = serialize_style(style_parts)
 
-    obj_id = generate_id("text")
+    obj_id = generate_id("text", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,

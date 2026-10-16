@@ -91,7 +91,7 @@ def add_rect(
     if width <= 0 or height <= 0:
         raise ValueError(f"Rectangle dimensions must be positive: {width}x{height}")
 
-    obj_id = generate_id("rect")
+    obj_id = generate_id("rect", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -118,7 +118,7 @@ def add_circle(
     if r <= 0:
         raise ValueError(f"Circle radius must be positive: {r}")
 
-    obj_id = generate_id("circle")
+    obj_id = generate_id("circle", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -144,7 +144,7 @@ def add_ellipse(
     if rx <= 0 or ry <= 0:
         raise ValueError(f"Ellipse radii must be positive: rx={rx}, ry={ry}")
 
-    obj_id = generate_id("ellipse")
+    obj_id = generate_id("ellipse", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -167,7 +167,7 @@ def add_line(
     layer: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add a line to the document."""
-    obj_id = generate_id("line")
+    obj_id = generate_id("line", project)
     line_style = style or "fill:none;stroke:#000000;stroke-width:2"
     obj = {
         "id": obj_id,
@@ -197,7 +197,7 @@ def add_polygon(
     if not points or not points.strip():
         raise ValueError("Polygon must have at least one point")
 
-    obj_id = generate_id("polygon")
+    obj_id = generate_id("polygon", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -226,7 +226,7 @@ def add_path(
     if not d or not d.strip():
         raise ValueError("Path data (d) cannot be empty")
 
-    obj_id = generate_id("path")
+    obj_id = generate_id("path", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -258,7 +258,7 @@ def add_star(
     # Generate star path data
     d = _star_path(cx, cy, points_count, outer_r, inner_r)
 
-    obj_id = generate_id("star")
+    obj_id = generate_id("star", project)
     obj = {
         "id": obj_id,
         "name": name or obj_id,
@@ -303,7 +303,7 @@ def duplicate_object(project: Dict[str, Any], index: int) -> Dict[str, Any]:
 
     original = objects[index]
     dup = copy.deepcopy(original)
-    new_id = generate_id(dup.get("type", "obj"))
+    new_id = generate_id(dup.get("type", "obj"), project)
     dup["id"] = new_id
     dup["name"] = f"{original.get('name', 'object')}_copy"
 

@@ -33,7 +33,7 @@ def add_layer(
         counter += 1
         final_name = f"{name} {counter}"
 
-    layer_id = generate_id("layer")
+    layer_id = generate_id("layer", project)
     layer = {
         "id": layer_id,
         "name": final_name,
