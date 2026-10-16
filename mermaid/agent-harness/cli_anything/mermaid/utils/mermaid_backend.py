@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
 import zlib
@@ -48,15 +49,36 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
         ) from exc
     except (urllib.error.URLError, OSError) as exc:
         raise RuntimeError(f"Could not reach renderer {RENDER_BASE}: {exc}") from exc
+    temporary_path = None
+    pending_fd = None
     try:
         parent = os.path.dirname(os.path.abspath(output_path))
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(output_path, "wb") as fh:
-            fh.write(data)
-        file_size = os.path.getsize(output_path)
+        pending_fd, temporary_path = tempfile.mkstemp(prefix=".mermaid-", dir=parent)
+        output_file = os.fdopen(pending_fd, "wb")
+        pending_fd = None  # The file object now owns the descriptor.
+        with output_file as fh:
+            if fh.write(data) != len(data):
+                raise OSError("Incomplete renderer output write")
+        file_size = os.path.getsize(temporary_path)
+        if file_size != len(data):
+            raise OSError("Incomplete renderer output file")
+        os.replace(temporary_path, output_path)
     except OSError as exc:
         raise RuntimeError(f"Could not write {output_path}: {exc}") from exc
+    finally:
+        # Best-effort cleanup must not hide the original write error.
+        if pending_fd is not None:
+            try:
+                os.close(pending_fd)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
     return {
         "output": os.path.abspath(output_path),
         "format": fmt,
