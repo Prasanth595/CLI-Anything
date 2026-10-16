@@ -1,15 +1,31 @@
 """Schema checks for the repo-level registry files (see CONTRIBUTING 'Registry fields')."""
 
 import json
+import shlex
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import pytest
+
+from cli_hub.installer import _install_strategy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIRED = {
     "name", "display_name", "version", "description", "requires", "homepage",
     "source_url", "install_cmd", "entry_point", "skill_md", "category",
     "contributors",
+}
+
+
+# Existing noncanonical entries are pinned individually; new local paths and
+# qgis must use the documented root skills/ layout without migrating six CLIs.
+LEGACY_SKILL_PATHS = {
+    "calibre": "calibre/agent-harness/cli_anything/calibre/skills/SKILL.md",
+    "lldb": "lldb/agent-harness/cli_anything/lldb/skills/SKILL.md",
+    "unrealinsights": "unrealinsights/agent-harness/cli_anything/unrealinsights/skills/SKILL.md",
+    "macrocli": "macrocli/agent-harness/cli_anything/macrocli/skills/SKILL.md",
+    "3mf": "3MF/agent-harness/cli_anything/threemf/skills/SKILL.md",
+    "minimax": "minimax/agent-harness/cli_anything/minimax/skills/SKILL.md",
 }
 
 
@@ -26,10 +42,15 @@ def test_names_unique_across_registries():
 @pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
 def test_required_fields_and_contributors_shape(fname):
     for c in _load(fname):
-        # Public (third-party) entries may install via npm/other managers.
-        optional = {"install_cmd"} if fname == "public_registry.json" else set()
+        source = "public" if fname == "public_registry.json" else "harness"
+        strategy = _install_strategy(dict(c, _source=source))
+        optional = {"install_cmd"} if source == "public" and strategy in {"npm", "bundled"} else set()
         missing = REQUIRED - c.keys() - optional
         assert not missing, f"{c.get('name')} missing {sorted(missing)}"
+        if "install_cmd" not in optional:
+            assert isinstance(c["install_cmd"], str) and c["install_cmd"].strip(), (
+                f"{c['name']} requires an install command for {strategy}"
+            )
         assert "contributor" not in c and "contributor_url" not in c, (
             f"{c['name']} uses legacy contributor fields; use 'contributors' list"
         )
@@ -45,10 +66,19 @@ def test_in_repo_skill_md_paths_exist(fname):
     for c in _load(fname):
         skill = c.get("skill_md")
         # URLs and installer commands (e.g. "npx skills add ...") are not local paths.
-        if not skill or skill.startswith("http") or " " in skill:
+        if not skill:
+            continue
+        url = urlsplit(skill)
+        if url.scheme in {"http", "https"} and url.netloc:
+            continue
+        command = shlex.split(skill)
+        if len(command) >= 4 and command[:3] == ["npx", "skills", "add"] and not command[3].startswith("-"):
             continue
         assert not Path(skill).is_absolute() and ".." not in Path(skill).parts, (
             f"{c['name']}: {skill} must be a relative in-repo path"
+        )
+        assert Path(skill).parts[0] == "skills" or LEGACY_SKILL_PATHS.get(c["name"]) == skill, (
+            f"{c['name']}: {skill} must live under skills/"
         )
         assert (REPO_ROOT / skill).is_file(), f"{c['name']}: {skill} not found"
 
@@ -57,4 +87,57 @@ def test_qgis_skill_md_is_canonical():
     # Regression: qgis once pointed at a harness-internal copy instead of root skills/.
     qgis = next(c for c in _load("registry.json") if c["name"] == "qgis")
     assert qgis["skill_md"] == "skills/cli-anything-qgis/SKILL.md"
-    assert qgis["source_url"].endswith("/QGIS/agent-harness")
+    assert qgis["source_url"] == "https://github.com/HKUDS/CLI-Anything/tree/main/QGIS/agent-harness"
+
+
+@pytest.mark.parametrize("skill", [
+    "skills/foo/SKILL.md typo", "https-not-a-url", "npx not-a-skill-command",
+    "QGIS/agent-harness/cli_anything/qgis/skills/SKILL.md",
+])
+def test_skill_validation_rejects_invalid_registry_values(monkeypatch, skill):
+    import sys
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [{"name": "qgis", "skill_md": skill}])
+    with pytest.raises(AssertionError):
+        test_in_repo_skill_md_paths_exist("registry.json")
+
+
+@pytest.mark.parametrize("strategy", ["command", "uv", "pip"])
+def test_public_install_strategy_requires_command(monkeypatch, strategy):
+    import sys
+    cli = dict(_load("public_registry.json")[0], install_strategy=strategy)
+    cli.pop("install_cmd", None)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [cli])
+    with pytest.raises(AssertionError):
+        test_required_fields_and_contributors_shape("public_registry.json")
+
+
+@pytest.mark.parametrize("url", [
+    "https://unrelated.example/other/branch/QGIS/agent-harness",
+    "https://github.com/HKUDS/CLI-Anything/tree/wrong-branch/QGIS/agent-harness",
+])
+def test_qgis_source_url_rejects_unrelated_host(monkeypatch, url):
+    import sys
+    qgis = next(c for c in _load("registry.json") if c["name"] == "qgis")
+    qgis = dict(qgis, source_url=url)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [qgis])
+    with pytest.raises(AssertionError):
+        test_qgis_skill_md_is_canonical()
+
+
+@pytest.mark.parametrize("name", ["android-cli", "obsidian-cli"])
+def test_bundled_public_entry_does_not_require_install_command(monkeypatch, name):
+    import sys
+    cli = next(c for c in _load("public_registry.json") if c["name"] == name)
+    cli = dict(cli)
+    cli.pop("install_cmd", None)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [cli])
+    test_required_fields_and_contributors_shape("public_registry.json")
+
+
+@pytest.mark.parametrize("skill", [
+    "https://example.com/a%20skill/SKILL.md", "npx skills add larksuite/cli -y -g",
+])
+def test_skill_validation_accepts_urls_and_explicit_skill_commands(monkeypatch, skill):
+    import sys
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [{"name": "external", "skill_md": skill}])
+    test_in_repo_skill_md_paths_exist("public_registry.json")
