@@ -244,6 +244,45 @@ class TestSceneAddNode:
         assert json.loads(result.output)["status"] == "ok"
 
 
+    @pytest.mark.parametrize("parent", ["", 'Bad"Parent', "Bad\\Parent", "Bad\nParent", "Bad\rParent"])
+    def test_add_node_rejects_unsafe_parent_in_inherited_scene(self, tmp_project, parent):
+        from cli_anything.godot.core.scene import add_node
+
+        scene = tmp_project / "scenes" / "Derived.tscn"
+        before = '[node name="Derived" instance=ExtResource("1")]\n'
+        scene.write_text(before)
+        assert add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", parent)["status"] == "error"
+        assert scene.read_text() == before
+
+    @pytest.mark.parametrize("header,parent", [
+        ('[node name = "Root" type = "Node"]', "."),
+        ('[node name = "Derived" instance = ExtResource("1")]', "BaseChild"),
+        ('[node name="Derived]Scene" instance=ExtResource("1")]', "BaseChild"),
+        ('[node name="Root" type="Node"]\n[node name="Sub]Scene" parent="." instance=ExtResource("1")]', "Sub]Scene/BaseChild"),
+    ])
+    def test_add_node_accepts_formatted_and_quoted_inherited_headers(self, tmp_project, header, parent):
+        from cli_anything.godot.core.scene import add_node, read_scene
+
+        scene = tmp_project / "scenes" / "Derived.tscn"
+        scene.write_text(header + "\n")
+        result = add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", parent)
+        assert result["status"] == "ok"
+        assert read_scene(str(tmp_project), "scenes/Derived.tscn")["nodes"][-1] == {
+            "name": "Child", "type": "Node", "parent": parent,
+        }
+
+
+    def test_body_property_does_not_make_a_node_instanced(self, tmp_project):
+        from cli_anything.godot.core.scene import add_node
+
+        scene = tmp_project / "scenes" / "Derived.tscn"
+        before = '[node name="Root" type="Node"]\ninstance = ExtResource("1")\n'
+        scene.write_text(before)
+        result = add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", "Missing")
+        assert result["status"] == "error"
+        assert scene.read_text() == before
+
+
 # ── Export tests ───────────────────────────────────────────────────────
 
 class TestExportPresets:

@@ -81,14 +81,12 @@ def read_scene(project_path: str, scene_path: str) -> dict:
                 current_attrs = {}
             continue
 
-        if line.startswith("[") and line.endswith("]"):
+        header = _parse_section_header(line)
+        if header is not None:
             if current_section and current_attrs:
                 _store_section(current_section, current_attrs,
                                nodes, ext_resources, sub_resources, connections)
-            tag_content = line[1:-1]
-            parts = tag_content.split(None, 1)
-            current_section = parts[0]
-            current_attrs = _parse_tag_attrs(parts[1] if len(parts) > 1 else "")
+            current_section, current_attrs = header
             continue
 
         if "=" in line and current_section:
@@ -132,7 +130,7 @@ def add_node(
     if not full_path.exists():
         return {"status": "error", "message": f"Scene not found: {scene_path}"}
 
-    for label, value in (("node name", node_name), ("node type", node_type)):
+    for label, value in (("node name", node_name), ("node type", node_type), ("parent", parent)):
         if not value or any(c in value for c in '"\\\n\r'):
             return {"status": "error", "message": f"Invalid {label}: {value!r}"}
     if "/" in node_name:
@@ -177,22 +175,24 @@ def _under_instanced_node(full_path: Path, parent: str) -> bool:
     inherited scene whose root has instance=...) are not listed in the file,
     so they cannot be validated against it.
     """
-    import re
     instanced = []
-    for m in re.finditer(r"^\[node\s+([^\]]*)\]", full_path.read_text(encoding="utf-8"), re.M):
-        attrs = m.group(1)
-        if not re.search(r"\binstance\s*=", attrs):
+    for line in full_path.read_text(encoding="utf-8").splitlines():
+        header = _parse_section_header(line.strip())
+        if header is None or header[0] != "node":
             continue
-        name = re.search(r'name="([^"]*)"', attrs)
-        par = re.search(r'parent="([^"]*)"', attrs)
+        attrs = header[1]
+        if "instance" not in attrs:
+            continue
+        name = attrs.get("name")
+        par = attrs.get("parent")
         if not name:
             continue
         if not par:
             instanced.append(".")
-        elif par.group(1) == ".":
-            instanced.append(name.group(1))
+        elif par == ".":
+            instanced.append(name)
         else:
-            instanced.append(f"{par.group(1)}/{name.group(1)}")
+            instanced.append(f"{par}/{name}")
     return any(i == "." or parent == i or parent.startswith(i + "/") for i in instanced)
 
 
@@ -202,14 +202,23 @@ def _generate_uid() -> str:
     return uuid.uuid4().hex[:12]
 
 
+
+def _parse_section_header(line: str) -> tuple[str, dict] | None:
+    """Read a complete tag, retaining closing brackets inside quoted values."""
+    if not (line.startswith("[") and line.endswith("]")):
+        return None
+    parts = line[1:-1].split(None, 1)
+    if not parts:
+        return None
+    return parts[0], _parse_tag_attrs(parts[1] if len(parts) > 1 else "")
+
+
 def _parse_tag_attrs(attr_string: str) -> dict:
     """Parse tag attributes like 'name="Foo" type="Node2D"'."""
     attrs = {}
     import re
-    for match in re.finditer(r'(\w+)="([^"]*)"', attr_string):
-        attrs[match.group(1)] = match.group(2)
-    for match in re.finditer(r'(\w+)=(\d+)', attr_string):
-        attrs[match.group(1)] = match.group(2)
+    for match in re.finditer(r'(\w+)\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^\s]+))', attr_string):
+        attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
     return attrs
 
 

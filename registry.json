@@ -1037,7 +1037,7 @@
     {
       "name": "godot",
       "display_name": "Godot Engine",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Game engine project management, scene editing, export and GDScript execution via Godot 4 headless mode",
       "requires": "Godot 4.x (godotengine.org)",
       "homepage": "https://godotengine.org",

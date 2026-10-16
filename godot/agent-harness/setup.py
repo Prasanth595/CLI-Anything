@@ -13,7 +13,7 @@ with open("cli_anything/godot/README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="cli-anything-godot",
-    version="1.0.0",
+    version="1.0.1",
     author="cli-anything contributors",
     author_email="",
     description="CLI harness for Godot Engine - Game project management, scene editing, export and GDScript execution. Recommended: Godot 4.x on PATH",
