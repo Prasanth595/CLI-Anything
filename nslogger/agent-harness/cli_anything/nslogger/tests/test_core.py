@@ -577,6 +577,22 @@ class TestMergeFiles:
         result = merge_files([path_a, path_b])
         assert len(result) == 4
 
+    def test_merge_handles_missing_and_timezone_aware_timestamps(self):
+        without_timestamp = make_msg(sequence=2, timestamp=None, text="no timestamp")
+        with_timestamp = make_msg(
+            sequence=1,
+            timestamp=datetime(2025, 10, 9, tzinfo=timezone.utc),
+            text="timestamped",
+        )
+
+        with patch(
+            "cli_anything.nslogger.core.parser.parse_file",
+            side_effect=[[with_timestamp], [without_timestamp]],
+        ):
+            result = merge_files(["a.rawnsloggerdata", "b.rawnsloggerdata"])
+
+        assert [msg.text for msg in result] == ["no timestamp", "timestamped"]
+
 
 # ---------------------------------------------------------------------------
 # listener
