@@ -1,5 +1,6 @@
 """Block structure analysis for NSLogger files."""
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import Iterator, List, Dict, Any
 from .message import LogMessage, MSG_TYPE_BLOCK_START, MSG_TYPE_BLOCK_END, MSG_TYPE_CLIENT_INFO
 
@@ -38,5 +39,6 @@ def merge_files(paths: List[str]) -> List[LogMessage]:
     all_msgs: List[LogMessage] = []
     for path in paths:
         all_msgs.extend(parse_file(path))
-    all_msgs.sort(key=lambda m: (m.timestamp or __import__("datetime").datetime.min, m.sequence))
+    missing_timestamp = datetime.min.replace(tzinfo=timezone.utc)
+    all_msgs.sort(key=lambda m: (m.timestamp or missing_timestamp, m.sequence))
     return all_msgs
