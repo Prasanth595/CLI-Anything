@@ -6,7 +6,7 @@ Covers:
 - Saving images to local disk
 """
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from cli_anything.comfyui.utils.comfyui_backend import api_get_raw
 from cli_anything.comfyui.core.queue import get_prompt_history
@@ -103,14 +103,15 @@ def download_prompt_images(
     Args:
         base_url: ComfyUI server base URL.
         prompt_id: The prompt ID returned from queue_prompt().
-        output_dir: Local directory to save images into.
+        output_dir: Local directory to save images into, preserving subfolders.
         overwrite: If True, overwrite existing files.
 
     Returns:
         List of result dicts from download_image(), one per image.
 
     Raises:
-        RuntimeError: If the prompt is not found or no images are available.
+        RuntimeError: If the prompt is not found, no images are available,
+            or an image path escapes the output directory.
     """
     images = list_output_images(base_url, prompt_id)
 
@@ -118,16 +119,38 @@ def download_prompt_images(
         raise RuntimeError(f"No output images found for prompt: {prompt_id}")
 
     output_d = Path(output_dir)
+    output_root = output_d.resolve()
+    destinations = []
+    for img in images:
+        filename = img["filename"]
+        # ComfyUI may run on a different OS. Interpret both separator styles
+        # and reject rooted paths before joining them to the local directory.
+        relative_path = PureWindowsPath(img.get("subfolder", "")) / filename
+        if (
+            not filename
+            or relative_path.drive
+            or relative_path.root
+            or ".." in relative_path.parts
+        ):
+            raise RuntimeError(f"Unsafe output image path: {relative_path}")
+        dest = output_d.joinpath(*relative_path.parts)
+        try:
+            dest.resolve().relative_to(output_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Output image path escapes the output directory: {relative_path}"
+            ) from exc
+        destinations.append(dest)
+
     output_d.mkdir(parents=True, exist_ok=True)
 
     results = []
-    for img in images:
+    for img, dest in zip(images, destinations):
         filename = img["filename"]
-        dest = str(output_d / filename)
         result = download_image(
             base_url=base_url,
             filename=filename,
-            output_path=dest,
+            output_path=str(dest),
             subfolder=img.get("subfolder", ""),
             image_type=img.get("type", "output"),
             overwrite=overwrite,

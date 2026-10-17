@@ -541,7 +541,7 @@ class TestImages:
         assert dest.read_bytes() == fake_png
 
     def test_download_prompt_images(self, tmp_path):
-        """Should download all images for a prompt to a directory."""
+        """Should preserve subfolders when output images share a filename."""
         mock_history = {
             "prompt_id": "abc-123",
             "status": "success",
@@ -549,6 +549,8 @@ class TestImages:
             "outputs": [
                 {"node_id": "9", "filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"},
                 {"node_id": "9", "filename": "ComfyUI_00002_.png", "subfolder": "", "type": "output"},
+                {"node_id": "10", "filename": "ComfyUI_00001_.png", "subfolder": "portraits/day", "type": "output"},
+                {"node_id": "11", "filename": "ComfyUI_00001_.png", "subfolder": "portraits/night", "type": "output"},
             ]
         }
         fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
@@ -561,8 +563,18 @@ class TestImages:
                 output_dir=str(tmp_path),
             )
 
-        assert len(results) == 2
+        assert len(results) == 4
         assert all(r["status"] == "downloaded" for r in results)
+        expected_paths = [
+            tmp_path / "ComfyUI_00001_.png",
+            tmp_path / "ComfyUI_00002_.png",
+            tmp_path / "portraits" / "day" / "ComfyUI_00001_.png",
+            tmp_path / "portraits" / "night" / "ComfyUI_00001_.png",
+        ]
+        assert [Path(r["path"]) for r in results] == [
+            path.resolve() for path in expected_paths
+        ]
+        assert all(Path(r["path"]).read_bytes() == fake_png for r in results)
 
 
 # ── CLI Integration Tests ─────────────────────────────────────────

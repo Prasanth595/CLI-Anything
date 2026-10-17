@@ -236,7 +236,7 @@
     {
       "name": "comfyui",
       "display_name": "ComfyUI",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "AI image generation workflow management via ComfyUI REST API",
       "requires": "ComfyUI running at http://localhost:8188",
       "homepage": "https://github.com/comfyanonymous/ComfyUI",
