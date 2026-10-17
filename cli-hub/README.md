@@ -119,3 +119,16 @@ export CLI_HUB_NO_ANALYTICS=1
 - **Web Hub**: [clianything.cc](https://clianything.cc)
 - **Repository**: [github.com/HKUDS/CLI-Anything](https://github.com/HKUDS/CLI-Anything)
 - **Live Catalog**: [SKILL.md](https://reeceyang.sgp1.cdn.digitaloceanspaces.com/SKILL.md)
+
+### Pinned npm packages in a source repository
+
+The `npm-source` install strategy supports a package inside a Git repository.
+It requires `npm_package`, an HTTPS `source_repo`, a full 40-character Git
+`source_ref`, and a contained relative `source_subdir`. The hub performs a
+filtered, sparse checkout of that pinned revision, runs `npm pack --json
+--ignore-scripts` in the package directory, and installs the resulting regular
+tarball globally. The manifest and packaged entry point are checked before
+installation; the temporary checkout is removed afterwards. Updates repeat the
+same procedure using the current registry pin; uninstall uses the package name.
+This requires Git and npm, but does not require a pre-existing repository checkout
+or depend on the caller's working directory.

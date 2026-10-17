@@ -723,12 +723,17 @@
       "description": "Geospatial project authoring, layout export, and processing via PyQGIS and qgis_process",
       "requires": "QGIS with qgis_process on PATH, PyQGIS importable",
       "homepage": "https://qgis.org",
+      "source_url": "https://github.com/HKUDS/CLI-Anything/tree/main/QGIS/agent-harness",
       "install_cmd": "pip install git+https://github.com/HKUDS/CLI-Anything.git#subdirectory=QGIS/agent-harness",
       "entry_point": "cli-anything-qgis",
-      "skill_md": "QGIS/agent-harness/cli_anything/qgis/skills/SKILL.md",
+      "skill_md": "skills/cli-anything-qgis/SKILL.md",
       "category": "scientific",
-      "contributor": "scially",
-      "contributor_url": "https://github.com/scially"
+      "contributors": [
+        {
+          "name": "scially",
+          "url": "https://github.com/scially"
+        }
+      ]
     },
     {
       "name": "chromadb",
@@ -773,10 +778,14 @@
       "display_name": "Sketch",
       "version": "1.0.0",
       "description": "Generate Sketch design files (.sketch) from JSON design specifications via sketch-constructor",
-      "requires": "Node.js >= 16.0.0",
+      "requires": "Node.js >= 16.0.0 and Git",
       "homepage": "https://www.sketch.com",
       "source_url": null,
-      "install_cmd": "cd sketch/agent-harness && npm install && npm link",
+      "install_strategy": "npm-source",
+      "npm_package": "sketch-harness",
+      "source_repo": "https://github.com/HKUDS/CLI-Anything.git",
+      "source_ref": "34f519533bc175d2fe287ab8316b0dd99bb9cc43",
+      "source_subdir": "sketch/agent-harness",
       "entry_point": "sketch-cli",
       "skill_md": null,
       "category": "design",
@@ -985,6 +994,7 @@
       "requires": "Rust toolchain (cargo) for source install, or manual binary download from GitHub Releases",
       "homepage": "https://github.com/allthingssecurity/clibrowser",
       "source_url": null,
+      "install_strategy": "command",
       "install_cmd": "cargo install --git https://github.com/allthingssecurity/clibrowser.git --tag v0.1.0 --locked",
       "entry_point": "clibrowser",
       "skill_md": null,
