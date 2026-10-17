@@ -288,7 +288,7 @@ def generate_chat(model_name, messages_input, messages_file, no_stream, temperat
 
     # Build messages list
     if messages_file:
-        with open(messages_file, "r") as f:
+        with open(messages_file, "r", encoding="utf-8") as f:
             messages = json.load(f)
     elif messages_input:
         messages = []

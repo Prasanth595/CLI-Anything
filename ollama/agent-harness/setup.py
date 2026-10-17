@@ -13,7 +13,7 @@ with open("cli_anything/ollama/README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="cli-anything-ollama",
-    version="1.0.1",
+    version="1.0.2",
     author="cli-anything contributors",
     author_email="",
     description="CLI harness for Ollama - Local LLM inference and model management via Ollama REST API. Recommended: Ollama running at http://localhost:11434",

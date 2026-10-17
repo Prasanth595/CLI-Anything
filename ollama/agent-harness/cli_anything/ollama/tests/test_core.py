@@ -538,6 +538,44 @@ class TestGenerateChatCommands:
         data = json.loads(result.output)
         assert data["message"]["content"] == "4"
 
+    @pytest.mark.parametrize("default_encoding", ["cp1252", "ascii"])
+    @patch("cli_anything.ollama.core.generate.api_post")
+    def test_chat_file_preserves_utf8_under_legacy_default(
+        self, mock_api, runner, tmp_path, default_encoding
+    ):
+        messages = [{"role": "user", "content": "你好，café ☕"}]
+        messages_file = tmp_path / "messages.json"
+        messages_file.write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8"
+        )
+        response = {
+            "message": {"role": "assistant", "content": "收到"},
+            "done": True,
+        }
+        mock_api.return_value = response
+        original_open = open
+
+        def open_with_legacy_default(file, mode="r", *args, **kwargs):
+            # Simulate a non-UTF-8 locale only for this input file. An explicit
+            # encoding must take precedence over the platform default.
+            if (
+                file == str(messages_file)
+                and "b" not in mode
+                and kwargs.get("encoding") is None
+            ):
+                kwargs["encoding"] = default_encoding
+            return original_open(file, mode, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=open_with_legacy_default):
+            result = runner.invoke(cli, [
+                "--json", "generate", "chat", "--model", "test-model",
+                "--file", str(messages_file), "--no-stream",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == response
+        assert mock_api.call_args.args[2]["messages"] == messages
+
     def test_chat_missing_model(self, runner):
         result = runner.invoke(cli, ["generate", "chat",
                                      "--message", "user:Hello"])
