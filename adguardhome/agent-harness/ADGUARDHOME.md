@@ -23,8 +23,8 @@ It exposes a REST HTTP API with 58 endpoints organized in 14 tag groups, secured
 | `filtering` | Rule-based filtering | `/filtering/status`, `/filtering/add_url`, `/filtering/remove_url` |
 | `blocked_services` | Block service categories | `/blocked_services/get`, `/blocked_services/set` |
 | `clients` | Known clients | `/clients`, `/clients/add`, `/clients/delete` |
-| `stats` | DNS query statistics | `/stats`, `/stats_reset`, `/stats_config` |
-| `log` | Query log | `/querylog`, `/querylog_config`, `/querylog_clear` |
+| `stats` | DNS query statistics | `/stats`, `/stats_reset`, `/stats/config`, `/stats/config/update` |
+| `log` | Query log | `/querylog`, `/querylog/config`, `/querylog/config/update`, `/querylog_clear` |
 | `dhcp` | Built-in DHCP server | `/dhcp/status`, `/dhcp/leases`, `/dhcp/set_config` |
 | `rewrite` | DNS rewrites | `/rewrite/list`, `/rewrite/add`, `/rewrite/delete` |
 | `parental` | Adult content blocking | `/parental/status`, `/parental/enable`, `/parental/disable` |

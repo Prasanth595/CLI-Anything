@@ -69,3 +69,12 @@ class AdGuardHomeClient:
             return self._handle_response(resp)
         except requests.exceptions.ConnectionError as e:
             raise self._connection_error(e)
+
+    def put(self, path: str, data: Any = None) -> Any:
+        """PUT request - sends JSON body, returns deserialized response."""
+        try:
+            resp = self.session.put(self._url(path), json=data, timeout=10)
+            resp.raise_for_status()
+            return self._handle_response(resp)
+        except requests.exceptions.ConnectionError as e:
+            raise self._connection_error(e)
