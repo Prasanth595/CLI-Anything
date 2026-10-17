@@ -68,11 +68,23 @@ def test_in_repo_skill_md_paths_exist(fname):
         # URLs and installer commands (e.g. "npx skills add ...") are not local paths.
         if not skill:
             continue
+        source = urlsplit(c.get("source_url") or "")
+        source_parts = [part.lower() for part in source.path.strip("/").split("/")[:2]]
+        if len(source_parts) == 2:
+            source_parts[1] = source_parts[1].removesuffix(".git")
+        source_repo = tuple(source_parts)
+        standalone = source.scheme in {"http", "https"} and bool(source.netloc) and not (
+            (source.hostname or "").lower() in {"github.com", "www.github.com"}
+            and source_repo == ("hkuds", "cli-anything")
+        )
+        external = fname == "public_registry.json" or standalone
         url = urlsplit(skill)
         if url.scheme in {"http", "https"} and url.netloc:
+            assert external, f"{c['name']}: in-repo skills must use a local skills/ path"
             continue
         command = shlex.split(skill)
         if len(command) >= 4 and command[:3] == ["npx", "skills", "add"] and not command[3].startswith("-"):
+            assert external, f"{c['name']}: in-repo skills must use a local skills/ path"
             continue
         assert not Path(skill).is_absolute() and ".." not in Path(skill).parts, (
             f"{c['name']}: {skill} must be a relative in-repo path"
@@ -141,3 +153,25 @@ def test_skill_validation_accepts_urls_and_explicit_skill_commands(monkeypatch, 
     import sys
     monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [{"name": "external", "skill_md": skill}])
     test_in_repo_skill_md_paths_exist("public_registry.json")
+
+
+@pytest.mark.parametrize("source_url", [
+    None,
+    "https://github.com/HKUDS/CLI-Anything/tree/main/gimp/agent-harness",
+    "https://github.com/HKUDS/CLI-Anything.git/tree/main/gimp/agent-harness",
+    "https://GITHUB.COM/HKUDS/CLI-Anything/tree/main/gimp/agent-harness",
+])
+@pytest.mark.parametrize("skill", ["https://unrelated.example/SKILL.md", "npx skills add untrusted/skill"])
+def test_in_repo_entries_cannot_bypass_local_skill_validation(monkeypatch, source_url, skill):
+    import sys
+    entry = {"name": "gimp", "source_url": source_url, "skill_md": skill}
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError):
+        test_in_repo_skill_md_paths_exist("registry.json")
+
+
+def test_standalone_registry_entry_can_reference_remote_skill(monkeypatch):
+    import sys
+    entry = {"name": "external", "source_url": "https://github.com/other/standalone", "skill_md": "https://example.com/SKILL.md"}
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    test_in_repo_skill_md_paths_exist("registry.json")
