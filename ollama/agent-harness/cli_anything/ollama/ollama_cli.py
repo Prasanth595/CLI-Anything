@@ -308,7 +308,7 @@ def generate_chat(model_name, messages_input, messages_file, no_stream, temperat
             _host, model_name, messages,
             options=options or None, stream=False,
         )
-        if not _json_output and "message" in result:
+        if "message" in result:
             _chat_history = messages + [result["message"]]
         output(result)
     else:
@@ -440,7 +440,7 @@ def repl():
     global _repl_mode
     _repl_mode = True
 
-    skin = ReplSkin("ollama", version="1.0.1")
+    skin = ReplSkin("ollama", version="1.0.2")
     skin.print_banner()
 
     pt_session = skin.create_prompt_session()
