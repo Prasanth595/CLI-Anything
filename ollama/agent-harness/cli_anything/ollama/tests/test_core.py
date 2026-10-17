@@ -121,6 +121,45 @@ class TestFormatSize:
 # ── CLI argument parsing ─────────────────────────────────────────
 
 class TestCLIParsing:
+    def test_release_versions_match_package_metadata(self):
+        import ast
+        import re
+        from pathlib import Path
+
+        harness_root = Path(__file__).resolve().parents[3]
+        package_root = harness_root / "cli_anything" / "ollama"
+        setup_tree = ast.parse((harness_root / "setup.py").read_text(encoding="utf-8"))
+        version = next(
+            node.value.value for node in ast.walk(setup_tree)
+            if isinstance(node, ast.keyword) and node.arg == "version"
+        )
+        cli_tree = ast.parse((package_root / "ollama_cli.py").read_text(encoding="utf-8"))
+        repl_versions = [
+            keyword.value.value
+            for node in ast.walk(cli_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ReplSkin"
+            for keyword in node.keywords if keyword.arg == "version"
+        ]
+        assert repl_versions == [version]
+
+        version_docs = [package_root / "README.md", package_root / "skills" / "SKILL.md"]
+        repo_root = harness_root.parents[1]
+        canonical_skill = repo_root / "skills" / "cli-anything-ollama" / "SKILL.md"
+        if canonical_skill.exists():
+            version_docs.append(canonical_skill)
+        for document in version_docs:
+            match = re.search(
+                r"(?m)^## Version\s*\n\s*(\S+)", document.read_text(encoding="utf-8")
+            )
+            assert match and match.group(1) == version, str(document)
+
+        registry_path = repo_root / "registry.json"
+        if registry_path.exists():
+            entries = json.loads(registry_path.read_text(encoding="utf-8"))["clis"]
+            assert next(item["version"] for item in entries if item["name"] == "ollama") == version
+
     def test_help(self, runner):
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0

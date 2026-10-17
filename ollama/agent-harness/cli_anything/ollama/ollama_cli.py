@@ -440,7 +440,7 @@ def repl():
     global _repl_mode
     _repl_mode = True
 
-    skin = ReplSkin("ollama", version="1.0.1")
+    skin = ReplSkin("ollama", version="1.0.2")
     skin.print_banner()
 
     pt_session = skin.create_prompt_session()
