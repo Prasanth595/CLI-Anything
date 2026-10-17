@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cli_hub.installer import _install_strategy
+from cli_hub.installer import _install_strategy, _npm_source_fields
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIRED = {
@@ -67,8 +67,12 @@ def test_required_fields_and_contributors_shape(fname):
                 assert isinstance(c[field], str) and c[field].strip(), (
                     f"{c.get('name')}: {field} must be nonblank text"
                 )
+                try:
+                    assert shlex.split(c[field]), f"{field} must contain a command"
+                except ValueError as exc:
+                    assert False, f"{field} is not parseable: {exc}"
         strategy = _install_strategy(dict(c, _source=source))
-        optional = {"install_cmd"} if source == "public" and strategy in {"npm", "bundled"} else set()
+        optional = {"install_cmd"} if (source == "public" and strategy in {"npm", "bundled"}) or strategy == "npm-source" else set()
         missing = REQUIRED - c.keys() - optional
         assert not missing, f"{c.get('name')} missing {sorted(missing)}"
         # Search, category listing, display, execution, and installed-state
@@ -96,10 +100,15 @@ def test_required_fields_and_contributors_shape(fname):
             assert c["install_cmd"].startswith("pip install ") and len(c["install_cmd"].split()) > 2, (
                 f"{c['name']}: pip strategy requires a pip install command"
             )
-        if strategy == "npm":
+        if strategy in {"npm", "npm-source"}:
             assert isinstance(c.get("npm_package"), str) and c["npm_package"].strip(), (
                 f"{c['name']} requires npm_package for npm"
             )
+        if strategy == "npm-source":
+            try:
+                _npm_source_fields(c)
+            except ValueError as exc:
+                assert False, str(exc)
         assert "contributor" not in c and "contributor_url" not in c, (
             f"{c['name']} uses legacy contributor fields; use 'contributors' list"
         )
@@ -392,7 +401,7 @@ def test_pip_strategy_requires_its_supported_command_prefix(monkeypatch, command
         test_required_fields_and_contributors_shape("registry.json")
 
 
-@pytest.mark.parametrize("name", ["sketch", "clibrowser"])
+@pytest.mark.parametrize("name", ["clibrowser"])
 def test_non_pip_registry_commands_use_real_generic_dispatch(monkeypatch, name):
     from subprocess import CompletedProcess
     from cli_hub import installer
@@ -415,3 +424,13 @@ def test_non_pip_registry_commands_use_real_generic_dispatch(monkeypatch, name):
     }
     command, shell = expected[name]
     assert commands == [(command, {"capture_output": True, "text": True, "shell": shell})]
+
+
+@pytest.mark.parametrize("field", ["install_cmd", "uninstall_cmd", "update_cmd"])
+@pytest.mark.parametrize("value", ['tool "unclosed', "tool 'unclosed"])
+def test_command_fields_require_parseable_quoting(monkeypatch, field, value):
+    import sys
+    entry = dict(_load("public_registry.json")[0], install_strategy="command", **{field: value})
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape("public_registry.json")

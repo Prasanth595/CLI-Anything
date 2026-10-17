@@ -1,12 +1,16 @@
 """Install, uninstall, and manage CLIs and matrices."""
 
 import json
+import re
+import tarfile
+import tempfile
 import shlex
 import shutil
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from cli_hub.registry import get_cli
 from cli_hub.matrix import get_matrix, resolve_install_scope, unmanaged_providers
@@ -74,10 +78,16 @@ def _run_command(cmd):
     so that script-type installs like ``curl … | bash`` work correctly.
     Commands come from the trusted registry, not from user input.
     """
+    if not isinstance(cmd, str) or not cmd.strip():
+        return subprocess.CompletedProcess(cmd, 2, "", "Invalid command: expected nonblank text")
+    try:
+        parts = shlex.split(cmd)
+    except (ValueError, TypeError, AttributeError) as exc:
+        return subprocess.CompletedProcess(cmd, 2, "", f"Invalid command: {exc}")
     use_shell = any(c in cmd for c in _SHELL_METACHARACTERS)
     try:
         return subprocess.run(
-            cmd if use_shell else shlex.split(cmd),
+            cmd if use_shell else parts,
             capture_output=True,
             text=True,
             shell=use_shell,
@@ -272,6 +282,74 @@ def _npm_install(cli):
     return False, f"npm install failed:\n{result.stderr}"
 
 
+
+def _npm_source_fields(cli):
+    """Validate the pinned repository and contained package directory."""
+    repo, ref, subdir = (cli.get(key) for key in ("source_repo", "source_ref", "source_subdir"))
+    if not all(isinstance(value, str) and value.strip() for value in (repo, ref, subdir)):
+        raise ValueError("npm-source requires source_repo, source_ref and source_subdir text")
+    url = urlsplit(repo)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ValueError("source_repo must be an HTTPS repository URL without credentials, query or fragment")
+    if not re.fullmatch(r"[0-9a-f]{40}", ref):
+        raise ValueError("source_ref must pin a full Git commit")
+    path = PurePosixPath(subdir)
+    if path.is_absolute() or ".." in path.parts or "\\" in subdir or ":" in subdir or path.as_posix() != subdir or subdir == ".":
+        raise ValueError("source_subdir must be a contained relative package directory")
+    return repo, ref, subdir
+
+
+def _npm_source_install(cli):
+    """Pack a pinned monorepo package, then install the self-contained tarball."""
+    npm, git = _find_npm(), shutil.which("git")
+    if npm is None or git is None:
+        return False, "npm and git are required to install a source package."
+    try:
+        repo, ref, subdir = _npm_source_fields(cli)
+        def run(args, cwd=None):
+            result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError(result.stderr or result.stdout or f"{args[0]} failed")
+            return result.stdout
+        with tempfile.TemporaryDirectory(prefix="cli-hub-npm-") as directory:
+            checkout = Path(directory) / "checkout"
+            run([git, "clone", "--filter=blob:none", "--no-checkout", "--depth", "1", repo, str(checkout)])
+            run([git, "-C", str(checkout), "sparse-checkout", "set", "--cone", "--", subdir])
+            run([git, "-C", str(checkout), "fetch", "--depth", "1", "origin", ref])
+            run([git, "-C", str(checkout), "checkout", "--detach", "FETCH_HEAD"])
+            if run([git, "-C", str(checkout), "rev-parse", "HEAD"]).strip() != ref:
+                raise ValueError("Source checkout does not match the pinned commit")
+            package = (checkout / subdir).resolve()
+            if not package.is_relative_to(checkout.resolve()) or not package.is_dir():
+                raise ValueError("Source package directory is missing or escapes the checkout")
+            packed = json.loads(run([npm, "pack", "--json", "--ignore-scripts"], cwd=package))
+            if not isinstance(packed, list) or len(packed) != 1 or not isinstance(packed[0], dict):
+                raise ValueError("npm pack must report exactly one tarball")
+            filename = packed[0].get("filename")
+            if not isinstance(filename, str) or not filename.endswith(".tgz") or PurePosixPath(filename).name != filename or "\\" in filename:
+                raise ValueError("npm pack reported an invalid tarball filename")
+            archive = package / filename
+            if archive.is_symlink() or not archive.is_file() or archive.resolve().parent != package:
+                raise ValueError("npm pack tarball is missing or escapes the package directory")
+            with tarfile.open(archive, "r:gz") as content:
+                metadata = content.getmember("package/package.json")
+                if not metadata.isfile() or metadata.size > 1024 * 1024:
+                    raise ValueError("Invalid packed package manifest")
+                manifest = json.load(content.extractfile(metadata))
+                if not isinstance(manifest, dict) or manifest.get("name") != cli["npm_package"]:
+                    raise ValueError("Packed package name does not match npm_package")
+                binary = manifest.get("bin", {})
+                binary = binary.get(cli["entry_point"]) if isinstance(binary, dict) else None
+                if not isinstance(binary, str) or PurePosixPath(binary).is_absolute() or ".." in PurePosixPath(binary).parts or "\\" in binary:
+                    raise ValueError("Packed package has no contained entry point")
+                if not content.getmember("package/" + PurePosixPath(binary).as_posix()).isfile():
+                    raise ValueError("Packed entry point is missing or is a link")
+            run([npm, "install", "--global", str(archive)])
+        return True, f"Installed {cli['display_name']} ({cli['entry_point']}) from pinned source"
+    except (OSError, ValueError, TypeError, KeyError, EOFError, tarfile.TarError) as exc:
+        return False, f"Source package install failed: {exc}"
+
+
 def _npm_uninstall(cli):
     npm = _find_npm()
     if npm is None:
@@ -304,6 +382,7 @@ def _perform_action(cli, action):
     actions = {
         "pip": {"install": _pip_install, "uninstall": _pip_uninstall, "update": _pip_update},
         "npm": {"install": _npm_install, "uninstall": _npm_uninstall, "update": _npm_update},
+        "npm-source": {"install": _npm_source_install, "uninstall": _npm_uninstall, "update": _npm_source_install},
         "uv": {"install": _uv_install, "uninstall": _uv_uninstall, "update": _uv_update},
         "command": {"install": _generic_install, "uninstall": _generic_uninstall, "update": _generic_update},
         "bundled": {"install": _bundled_install, "uninstall": _bundled_uninstall, "update": _bundled_update},
@@ -324,6 +403,9 @@ def _installed_entry(cli, source, strategy):
         entry["package_manager"] = cli["package_manager"]
     if cli.get("npm_package"):
         entry["npm_package"] = cli["npm_package"]
+    for field in ("source_repo", "source_ref", "source_subdir"):
+        if cli.get(field):
+            entry[field] = cli[field]
     if cli.get("install_cmd"):
         entry["install_cmd"] = cli["install_cmd"]
     if cli.get("uninstall_cmd"):
