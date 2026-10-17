@@ -10,7 +10,7 @@ from setuptools import setup, find_namespace_packages
 
 setup(
     name="cli-anything-comfyui",
-    version="1.0.0",
+    version="1.0.1",
     author="cli-anything contributors",
     author_email="",
     description="CLI harness for ComfyUI - AI image generation workflow management via ComfyUI REST API. Requires: ComfyUI running at http://localhost:8188",

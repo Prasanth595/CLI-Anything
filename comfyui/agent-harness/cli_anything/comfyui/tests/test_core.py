@@ -540,8 +540,9 @@ class TestImages:
 
         assert dest.read_bytes() == fake_png
 
-    def test_download_prompt_images(self, tmp_path):
-        """Should download all images for a prompt to a directory."""
+    @pytest.mark.parametrize("overwrite", [False, True])
+    def test_download_prompt_images(self, tmp_path, overwrite):
+        """Should preserve subfolders when output images share a filename."""
         mock_history = {
             "prompt_id": "abc-123",
             "status": "success",
@@ -549,20 +550,100 @@ class TestImages:
             "outputs": [
                 {"node_id": "9", "filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"},
                 {"node_id": "9", "filename": "ComfyUI_00002_.png", "subfolder": "", "type": "output"},
+                {"node_id": "10", "filename": "ComfyUI_00001_.png", "subfolder": "portraits/day", "type": "output"},
+                {"node_id": "11", "filename": "ComfyUI_00001_.png", "subfolder": "portraits/night", "type": "output"},
             ]
         }
-        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+        image_bytes = [
+            b"\x89PNG\r\n\x1a\n" + bytes([index]) * 20 for index in range(4)
+        ]
 
         with patch("cli_anything.comfyui.core.images.get_prompt_history", return_value=mock_history), \
-             patch("cli_anything.comfyui.core.images.api_get_raw", return_value=fake_png):
+             patch("cli_anything.comfyui.core.images.api_get_raw", side_effect=image_bytes):
             results = images_mod.download_prompt_images(
                 base_url="http://localhost:8188",
                 prompt_id="abc-123",
                 output_dir=str(tmp_path),
+                overwrite=overwrite,
             )
 
-        assert len(results) == 2
+        assert len(results) == 4
         assert all(r["status"] == "downloaded" for r in results)
+        expected_paths = [
+            tmp_path / "ComfyUI_00001_.png",
+            tmp_path / "ComfyUI_00002_.png",
+            tmp_path / "portraits" / "day" / "ComfyUI_00001_.png",
+            tmp_path / "portraits" / "night" / "ComfyUI_00001_.png",
+        ]
+        assert [Path(r["path"]) for r in results] == [
+            path.resolve() for path in expected_paths
+        ]
+        assert [Path(r["path"]).read_bytes() for r in results] == image_bytes
+
+    @pytest.mark.parametrize("subfolder", ["portraits/day", r"portraits\day"])
+    def test_download_prompt_images_handles_server_path_separators(self, tmp_path, subfolder):
+        image = {"filename": "image.png", "subfolder": subfolder, "type": "output"}
+        with patch("cli_anything.comfyui.core.images.list_output_images", return_value=[image]), \
+             patch("cli_anything.comfyui.core.images.api_get_raw", return_value=b"image") as mock_get:
+            result = images_mod.download_prompt_images(
+                "http://localhost:8188", "prompt", str(tmp_path)
+            )
+
+        assert Path(result[0]["path"]) == (tmp_path / "portraits" / "day" / "image.png").resolve()
+        mock_get.assert_called_once_with(
+            "http://localhost:8188",
+            "/view",
+            params={"filename": "image.png", "type": "output", "subfolder": subfolder},
+        )
+
+    @pytest.mark.parametrize("subfolder,filename", [
+        ("../outside", "image.png"),
+        ("/outside", "image.png"),
+        (r"C:\outside", "image.png"),
+        (r"\\server\share", "image.png"),
+        ("", "../outside.png"),
+        ("", r"C:\outside.png"),
+        ("", r"\outside.png"),
+        ("safe", r"..\outside.png"),
+        ("", ""),
+    ])
+    def test_download_prompt_images_rejects_unsafe_paths_before_downloading(
+        self, tmp_path, subfolder, filename
+    ):
+        images = [
+            {"filename": "safe.png", "subfolder": "", "type": "output"},
+            {"filename": filename, "subfolder": subfolder, "type": "output"},
+        ]
+        output_dir = tmp_path / "downloads"
+        with patch("cli_anything.comfyui.core.images.list_output_images", return_value=images), \
+             patch("cli_anything.comfyui.core.images.api_get_raw") as mock_get:
+            with pytest.raises(RuntimeError, match="Unsafe output image path"):
+                images_mod.download_prompt_images(
+                    "http://localhost:8188", "prompt", str(output_dir)
+                )
+
+        mock_get.assert_not_called()
+        assert not output_dir.exists()
+
+    def test_download_prompt_images_rejects_symlink_escape(self, tmp_path):
+        output_dir = tmp_path / "downloads"
+        output_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        try:
+            (output_dir / "linked").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlinks are unavailable: {exc}")
+        image = {"filename": "image.png", "subfolder": "linked", "type": "output"}
+        with patch("cli_anything.comfyui.core.images.list_output_images", return_value=[image]), \
+             patch("cli_anything.comfyui.core.images.api_get_raw") as mock_get:
+            with pytest.raises(RuntimeError, match="escapes the output directory"):
+                images_mod.download_prompt_images(
+                    "http://localhost:8188", "prompt", str(output_dir)
+                )
+
+        mock_get.assert_not_called()
+        assert not (outside / "image.png").exists()
 
 
 # ── CLI Integration Tests ─────────────────────────────────────────
