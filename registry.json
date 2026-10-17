@@ -778,7 +778,7 @@
       "display_name": "Sketch",
       "version": "1.0.0",
       "description": "Generate Sketch design files (.sketch) from JSON design specifications via sketch-constructor",
-      "requires": "Node.js >= 16.0.0",
+      "requires": "Node.js >= 16.0.0 and Git",
       "homepage": "https://www.sketch.com",
       "source_url": null,
       "install_strategy": "npm-source",
