@@ -29,6 +29,14 @@ LEGACY_SKILL_PATHS = {
 }
 
 
+# Registry identifiers whose canonical root skill uses a different spelling.
+SKILL_NAME_ALIASES = {
+    "cc-switch": "ccswitch",
+    "slay_the_spire_ii": "slay-the-spire-ii",
+    "unimol_tools": "unimol-tools",
+}
+
+
 def _load(name):
     return json.loads((REPO_ROOT / name).read_text(encoding="utf-8"))["clis"]
 
@@ -50,6 +58,10 @@ def test_required_fields_and_contributors_shape(fname):
         if "install_cmd" not in optional:
             assert isinstance(c["install_cmd"], str) and c["install_cmd"].strip(), (
                 f"{c['name']} requires an install command for {strategy}"
+            )
+        if strategy == "npm":
+            assert isinstance(c.get("npm_package"), str) and c["npm_package"].strip(), (
+                f"{c['name']} requires npm_package for npm"
             )
         assert "contributor" not in c and "contributor_url" not in c, (
             f"{c['name']} uses legacy contributor fields; use 'contributors' list"
@@ -92,6 +104,9 @@ def test_in_repo_skill_md_paths_exist(fname):
         assert Path(skill).parts[0] == "skills" or LEGACY_SKILL_PATHS.get(c["name"]) == skill, (
             f"{c['name']}: {skill} must live under skills/"
         )
+        skill_name = SKILL_NAME_ALIASES.get(c["name"], c["name"])
+        expected = LEGACY_SKILL_PATHS.get(c["name"], f"skills/cli-anything-{skill_name}/SKILL.md")
+        assert skill == expected, f"{c['name']}: {skill} must be its own canonical skill {expected}"
         assert (REPO_ROOT / skill).is_file(), f"{c['name']}: {skill} not found"
 
 
@@ -175,3 +190,41 @@ def test_standalone_registry_entry_can_reference_remote_skill(monkeypatch):
     entry = {"name": "external", "source_url": "https://github.com/other/standalone", "skill_md": "https://example.com/SKILL.md"}
     monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
     test_in_repo_skill_md_paths_exist("registry.json")
+
+
+@pytest.mark.parametrize("package", [None, "", "  ", False, 7])
+def test_npm_strategy_rejects_invalid_package_metadata(monkeypatch, package):
+    import sys
+    cli = dict(_load("public_registry.json")[0], package_manager="npm")
+    cli.pop("install_strategy", None)
+    cli.pop("install_cmd", None)
+    if package is None:
+        cli.pop("npm_package", None)
+    else:
+        cli["npm_package"] = package
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [cli])
+    with pytest.raises(AssertionError):
+        test_required_fields_and_contributors_shape("public_registry.json")
+
+
+def test_npm_strategy_accepts_its_package_without_install_command(monkeypatch):
+    import sys
+    cli = dict(_load("public_registry.json")[0], package_manager="npm", npm_package="@example/cli")
+    cli.pop("install_strategy", None)
+    cli.pop("install_cmd", None)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [cli])
+    test_required_fields_and_contributors_shape("public_registry.json")
+
+
+@pytest.mark.parametrize("name,skill", [
+    ("gimp", "skills/cli-anything-qgis/SKILL.md"),
+    ("cc-switch", "skills/cli-anything-qgis/SKILL.md"),
+    ("slay_the_spire_ii", "skills/cli-anything-gimp/SKILL.md"),
+    ("unimol_tools", "skills/cli-anything-gimp/SKILL.md"),
+    ("calibre", "skills/cli-anything-gimp/SKILL.md"),
+])
+def test_local_skill_cannot_reference_another_entry(monkeypatch, name, skill):
+    import sys
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [{"name": name, "skill_md": skill}])
+    with pytest.raises(AssertionError):
+        test_in_repo_skill_md_paths_exist("registry.json")
