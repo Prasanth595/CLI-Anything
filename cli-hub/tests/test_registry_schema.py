@@ -1,6 +1,7 @@
 """Schema checks for the repo-level registry files (see CONTRIBUTING 'Registry fields')."""
 
 import json
+import re
 import shlex
 from urllib.parse import urlsplit
 from pathlib import Path
@@ -45,12 +46,22 @@ def test_names_unique_across_registries():
     # cli_hub.registry merges both files and matches names case-insensitively.
     names = [c["name"].lower() for f in ("registry.json", "public_registry.json") for c in _load(f)]
     assert len(names) == len(set(names))
+    # Launch resolves entry_point on PATH, independently of the registry name;
+    # keep those command identities unique on case-insensitive platforms too.
+    entries = [c["entry_point"].casefold() for f in ("registry.json", "public_registry.json") for c in _load(f)]
+    assert len(entries) == len(set(entries)), "entry_point values must be unique across registries"
 
 
 @pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
 def test_required_fields_and_contributors_shape(fname):
     for c in _load(fname):
         source = "public" if fname == "public_registry.json" else "harness"
+        # Both hub renderers call toLowerCase on these optional fields.
+        for field in ("package_manager", "install_strategy"):
+            if field in c:
+                assert isinstance(c[field], str) and c[field].strip(), (
+                    f"{c.get('name')}: {field} must be nonblank text"
+                )
         strategy = _install_strategy(dict(c, _source=source))
         optional = {"install_cmd"} if source == "public" and strategy in {"npm", "bundled"} else set()
         missing = REQUIRED - c.keys() - optional
@@ -61,6 +72,12 @@ def test_required_fields_and_contributors_shape(fname):
             assert isinstance(c[field], str) and c[field].strip(), (
                 f"{c.get('name')}: {field} must be nonblank text"
             )
+        assert re.fullmatch(r"[a-z0-9][a-z0-9_-]*", c["name"]), (
+            f"{c['name']}: name must be a lowercase command token"
+        )
+        assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", c["entry_point"]), (
+            f"{c['name']}: entry_point must be a command token"
+        )
         # These fields explicitly permit null in the contributor contract.
         for field in ("requires", "source_url", "skill_md"):
             assert c[field] is None or isinstance(c[field], str), (
@@ -302,3 +319,41 @@ def test_text_contract_guards_real_search_consumer(monkeypatch, field):
     monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
     with pytest.raises(AssertionError, match=field):
         test_required_fields_and_contributors_shape("registry.json")
+
+
+@pytest.mark.parametrize("field,values", [
+    ("name", ["bad name", "--help", "tool;echo", "tool/name", "UPPER"]),
+    ("entry_point", ["tool --json", "--help", "tool;echo", "tool/name", "tool\\name"]),
+])
+@pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
+def test_identifiers_reject_values_that_are_not_command_tokens(monkeypatch, field, values, fname):
+    import sys
+    entry = _load(fname)[0]
+    for value in values:
+        monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [dict(entry, **{field: value})])
+        with pytest.raises(AssertionError, match=field):
+            test_required_fields_and_contributors_shape(fname)
+
+
+@pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
+@pytest.mark.parametrize("field", ["package_manager", "install_strategy"])
+@pytest.mark.parametrize("value", [7, True, [], {}, None, "", "  "])
+def test_present_strategy_fields_require_nonblank_text(monkeypatch, fname, field, value):
+    import sys
+    entry = dict(_load(fname)[0], **{field: value})
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape(fname)
+
+
+@pytest.mark.parametrize("same_registry", [False, True])
+@pytest.mark.parametrize("second_entry_point", ["shared-cli", "SHARED-CLI"])
+def test_entry_points_cannot_collide_for_differently_named_entries(monkeypatch, same_registry, second_entry_point):
+    import sys
+    first = {"name": "first", "entry_point": "shared-cli"}
+    second = {"name": "second", "entry_point": second_entry_point}
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda fname:
+                        ([first, second] if same_registry else [first]) if fname == "registry.json"
+                        else ([] if same_registry else [second]))
+    with pytest.raises(AssertionError, match="entry_point"):
+        test_names_unique_across_registries()
