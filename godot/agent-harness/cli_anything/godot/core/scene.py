@@ -136,21 +136,15 @@ def add_node(
     if "/" in node_name:
         return {"status": "error", "message": f"Invalid node name (contains '/'): {node_name!r}"}
 
-    # Godot rejects scenes whose nodes reference a missing parent or reuse a
-    # sibling name, so check against the nodes already in the file.
-    existing = read_scene(project_path, scene_path)["nodes"]
-    paths = set()
-    for n in existing:
-        n_parent = n.get("parent")
-        if n_parent is None:
-            paths.add(".")
-        elif n_parent == ".":
-            paths.add(n.get("name", ""))
-        else:
-            paths.add(f"{n_parent}/{n.get('name', '')}")
-    if parent not in paths and not _under_instanced_node(full_path, parent):
+    # Verify the full PackedScene hierarchy before either parent or sibling checks.
+    try:
+        parent = _normalize_node_path(parent)
+        paths = _scene_node_paths(Path(project_path).resolve(), full_path, set())
+        new_path = _normalize_node_path(node_name if parent == "." else f"{parent}/{node_name}")
+    except (OSError, ValueError) as exc:
+        return {"status": "error", "message": f"Cannot verify scene hierarchy: {exc}"}
+    if parent not in paths:
         return {"status": "error", "message": f"Parent node not found in scene: {parent}"}
-    new_path = node_name if parent == "." else f"{parent}/{node_name}"
     if new_path in paths:
         return {"status": "error", "message": f"Node already exists: {new_path}"}
 
@@ -168,32 +162,67 @@ def add_node(
 
 # ---------- internal helpers ----------
 
-def _under_instanced_node(full_path: Path, parent: str) -> bool:
-    """True if parent may be a node inherited from an instanced/base scene.
-
-    Children supplied by an instanced PackedScene (or by the base of an
-    inherited scene whose root has instance=...) are not listed in the file,
-    so they cannot be validated against it.
-    """
-    instanced = []
-    for line in full_path.read_text(encoding="utf-8").splitlines():
-        header = _parse_section_header(line.strip())
-        if header is None or header[0] != "node":
+def _normalize_node_path(value: str) -> str:
+    """Canonical root-relative NodePath used for membership and duplicate checks."""
+    if value.startswith("/") or ":" in value:
+        raise ValueError(f"Expected a relative node path: {value!r}")
+    parts = []
+    for part in value.split("/"):
+        if part in ("", "."):
             continue
-        attrs = header[1]
-        if "instance" not in attrs:
-            continue
-        name = attrs.get("name")
-        par = attrs.get("parent")
-        if not name:
-            continue
-        if not par:
-            instanced.append(".")
-        elif par == ".":
-            instanced.append(name)
+        if part == "..":
+            if not parts:
+                raise ValueError(f"Node path escapes the scene root: {value!r}")
+            parts.pop()
         else:
-            instanced.append(f"{par}/{name}")
-    return any(i == "." or parent == i or parent.startswith(i + "/") for i in instanced)
+            parts.append(part)
+    return "/".join(parts) or "."
+
+
+def _scene_node_paths(project_root: Path, scene_path: Path, ancestors: set[Path]) -> set[str]:
+    """Resolve local TSCN PackedScenes; refuse unknown references rather than guess."""
+    import re
+    scene_path = scene_path.resolve()
+    if not scene_path.is_relative_to(project_root):
+        raise ValueError("PackedScene path escapes the project")
+    if scene_path in ancestors or len(ancestors) >= 64:
+        raise ValueError("Cyclic or too-deep PackedScene hierarchy")
+    ancestors = ancestors | {scene_path}
+    headers = [header for line in scene_path.read_text(encoding="utf-8").splitlines()
+               if (header := _parse_section_header(line.strip())) is not None]
+    resources = {attrs.get("id"): attrs for kind, attrs in headers if kind == "ext_resource"}
+    nodes = [attrs for kind, attrs in headers if kind == "node"]
+    if sum("parent" not in node for node in nodes) != 1:
+        raise ValueError("Scene must declare exactly one root node")
+    paths = set()
+    parents = []
+    for node in nodes:
+        name = node.get("name")
+        if not name:
+            raise ValueError("Scene node has no name")
+        parent = node.get("parent")
+        if parent is None:
+            node_path = "."
+        else:
+            parent = _normalize_node_path(parent)
+            parents.append(parent)
+            node_path = _normalize_node_path(f"{parent}/{name}")
+        paths.add(node_path)
+        if "instance" not in node:
+            continue
+        match = re.fullmatch(r'ExtResource\s*\(\s*"([^"\\]+)"\s*\)', node["instance"])
+        resource = resources.get(match.group(1)) if match else None
+        if not resource or resource.get("type") != "PackedScene":
+            raise ValueError(f"Cannot resolve PackedScene instance at {node_path}")
+        resource_path = resource.get("path", "")
+        if not resource_path.startswith("res://"):
+            raise ValueError(f"Unsupported PackedScene path: {resource_path!r}")
+        inherited = _scene_node_paths(project_root, project_root / resource_path[6:], ancestors)
+        for child in inherited:
+            paths.add(node_path if child == "." else _normalize_node_path(f"{node_path}/{child}"))
+    if any(parent not in paths for parent in parents):
+        raise ValueError("Scene contains an unresolved parent node")
+    return paths
 
 
 def _generate_uid() -> str:
@@ -217,7 +246,7 @@ def _parse_tag_attrs(attr_string: str) -> dict:
     """Parse tag attributes like 'name="Foo" type="Node2D"'."""
     attrs = {}
     import re
-    for match in re.finditer(r'(\w+)\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^\s]+))', attr_string):
+    for match in re.finditer(r'(\w+)\s*=\s*(?:"((?:\\.|[^"\\])*)"|((?:ExtResource|SubResource)\s*\(\s*"[^"]*"\s*\)|[^\s]+))', attr_string):
         attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
     return attrs
 

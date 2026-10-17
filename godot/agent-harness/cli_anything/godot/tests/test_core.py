@@ -256,15 +256,15 @@ class TestSceneAddNode:
 
     @pytest.mark.parametrize("header,parent", [
         ('[node name = "Root" type = "Node"]', "."),
-        ('[node name = "Derived" instance = ExtResource("1")]', "BaseChild"),
-        ('[node name="Derived]Scene" instance=ExtResource("1")]', "BaseChild"),
-        ('[node name="Root" type="Node"]\n[node name="Sub]Scene" parent="." instance=ExtResource("1")]', "Sub]Scene/BaseChild"),
+        ('[node name = "Derived" instance = ExtResource( "1" )]', "Player"),
+        ('[node name="Derived]Scene" instance=ExtResource("1")]', "Player"),
+        ('[node name="Root" type="Node"]\n[node name="Sub]Scene" parent="." instance=ExtResource("1")]', "Sub]Scene/Player"),
     ])
     def test_add_node_accepts_formatted_and_quoted_inherited_headers(self, tmp_project, header, parent):
         from cli_anything.godot.core.scene import add_node, read_scene
 
         scene = tmp_project / "scenes" / "Derived.tscn"
-        scene.write_text(header + "\n")
+        scene.write_text('[ext_resource type="PackedScene" path="res://scenes/Level1.tscn" id="1"]\n' + header + "\n")
         result = add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", parent)
         assert result["status"] == "ok"
         assert read_scene(str(tmp_project), "scenes/Derived.tscn")["nodes"][-1] == {
@@ -281,6 +281,41 @@ class TestSceneAddNode:
         result = add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", "Missing")
         assert result["status"] == "error"
         assert scene.read_text() == before
+
+
+    @pytest.mark.parametrize("header,parent,name", [
+        ('[node name="Derived" instance=ExtResource("1")]', "Nope", "Gun"),
+        ('[node name="Derived" instance=ExtResource("1")]', ".", "Player"),
+        ('[node name="Root" type="Node"]\n[node name="Sub" parent="." instance=ExtResource("1")]', "Sub/Nope", "Gun"),
+        ('[node name="Root" type="Node"]\n[node name="Sub" parent="." instance=ExtResource("1")]', "Sub", "Player"),
+    ])
+    def test_inherited_hierarchy_rejects_missing_parents_and_duplicates(self, tmp_project, header, parent, name):
+        from cli_anything.godot.core.scene import add_node
+        scene = tmp_project / "scenes" / "Derived.tscn"
+        before = '[ext_resource type="PackedScene" path="res://scenes/Level1.tscn" id="1"]\n' + header + "\n"
+        scene.write_text(before)
+        assert add_node(str(tmp_project), "scenes/Derived.tscn", name, "Node", parent)["status"] == "error"
+        assert scene.read_text() == before
+
+    @pytest.mark.parametrize("reference", ["res://scenes/missing.tscn", "res://scenes/Derived.tscn", "uid://unknown"])
+    def test_unverifiable_inherited_hierarchy_is_not_written(self, tmp_project, reference):
+        from cli_anything.godot.core.scene import add_node
+        scene = tmp_project / "scenes" / "Derived.tscn"
+        before = f'[ext_resource type="PackedScene" path="{reference}" id="1"]\n[node name="Derived" instance=ExtResource("1")]\n'
+        scene.write_text(before)
+        result = add_node(str(tmp_project), "scenes/Derived.tscn", "Child", "Node", ".")
+        assert result["status"] == "error"
+        assert "Cannot verify scene hierarchy" in result["message"]
+        assert scene.read_text() == before
+
+    def test_equivalent_parent_nodepaths_share_membership_and_duplicates(self, runner, tmp_project):
+        from cli_anything.godot.core.scene import add_node
+        assert self._add(runner, tmp_project, "Child", parent="./Player")["status"] == "ok"
+        scene = tmp_project / "scenes/Level1.tscn"
+        before = scene.read_text()
+        assert add_node(str(tmp_project), "scenes/Level1.tscn", "Child", "Node", "Player/.")["status"] == "error"
+        assert scene.read_text() == before
+        assert add_node(str(tmp_project), "scenes/Level1.tscn", "Grandchild", "Node", "./Player/Child/..")["status"] == "ok"
 
 
 # ── Export tests ───────────────────────────────────────────────────────
