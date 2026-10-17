@@ -53,15 +53,17 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
     temporary_path = None
     pending_fd = None
     try:
-        parent = os.path.dirname(os.path.abspath(output_path))
+        destination_path = os.path.realpath(output_path)
+        parent = os.path.dirname(destination_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         try:
-            destination_mode = stat.S_IMODE(os.stat(output_path).st_mode)
+            destination_mode = stat.S_IMODE(os.stat(destination_path).st_mode)
         except FileNotFoundError:
             destination_mode = None
         candidate_path = os.path.join(parent, f".mermaid-{secrets.token_hex(16)}")
-        pending_fd = os.open(candidate_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        creation_mode = destination_mode if destination_mode is not None else 0o666
+        pending_fd = os.open(candidate_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, creation_mode)
         temporary_path = candidate_path  # Cleanup only a file we created successfully.
         output_file = os.fdopen(pending_fd, "wb")
         pending_fd = None  # The file object now owns the descriptor.
@@ -73,7 +75,7 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
             raise OSError("Incomplete renderer output file")
         if destination_mode is not None:
             os.chmod(temporary_path, destination_mode)
-        os.replace(temporary_path, output_path)
+        os.replace(temporary_path, destination_path)
     except OSError as exc:
         raise RuntimeError(f"Could not write {output_path}: {exc}") from exc
     finally:

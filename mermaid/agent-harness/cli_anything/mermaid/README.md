@@ -61,6 +61,7 @@ cli-anything-mermaid --project diagram.mermaid.json
 
 - Project files are stored as `.mermaid.json`
 - Rendered output is produced through the same serialized state payload the live editor uses
+- Overwriting a symlink updates its resolved target and keeps the link. Output is staged beside the target; existing restrictive permissions apply while the staged content is written.
 - `export share` emits URLs that open in Mermaid Live Editor
 
 ## Running tests

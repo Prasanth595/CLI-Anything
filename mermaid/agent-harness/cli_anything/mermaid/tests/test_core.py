@@ -340,3 +340,140 @@ def test_render_exclusive_creation_never_removes_a_collision(monkeypatch, tmp_pa
         mermaid_backend.render_to_file("pako:x", str(target), "svg")
     assert collision.read_bytes() == b"another writer"
     assert target.read_bytes() == b"original"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode contract")
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o400])
+def test_render_temporary_is_restrictive_while_content_is_written(monkeypatch, tmp_path, mode):
+    import io
+    import stat
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"private render"))
+    target = tmp_path / "out.svg"
+    target.write_bytes(b"original")
+    target.chmod(mode)
+    real_fdopen = os.fdopen
+    observed = []
+
+    class ObservedWriter:
+        def __init__(self, file):
+            self.file = file
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+        def write(self, data):
+            written = self.file.write(data)
+            self.file.flush()
+            observed.append(stat.S_IMODE(os.fstat(self.file.fileno()).st_mode))
+            return written
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: ObservedWriter(real_fdopen(fd, *a, **k)))
+    previous = os.umask(0o022)
+    try:
+        mermaid_backend.render_to_file("pako:x", str(target), "svg")
+    finally:
+        os.umask(previous)
+    assert observed == [mode]
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert target.read_bytes() == b"private render"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode contract")
+def test_render_failed_cleanup_keeps_restrictive_temporary_mode(monkeypatch, tmp_path):
+    import io
+    import stat
+    target = tmp_path / "out.svg"
+    target.write_bytes(b"original")
+    target.chmod(0o600)
+    with monkeypatch.context() as patch:
+        patch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"private render"))
+        def fail_size(path):
+            raise OSError("original size failure")
+        def fail_cleanup(path):
+            raise OSError("cleanup denied")
+        patch.setattr(os.path, "getsize", fail_size)
+        patch.setattr(os, "unlink", fail_cleanup)
+        previous = os.umask(0o022)
+        try:
+            with pytest.raises(RuntimeError, match="original size failure"):
+                mermaid_backend.render_to_file("pako:x", str(target), "svg")
+        finally:
+            os.umask(previous)
+        pending = list(tmp_path.glob(".mermaid-*"))
+        assert len(pending) == 1
+        assert stat.S_IMODE(pending[0].stat().st_mode) == 0o600
+        assert target.read_bytes() == b"original"
+    for pending_file in tmp_path.glob(".mermaid-*"):
+        pending_file.unlink()
+
+
+@pytest.mark.parametrize("existing_target", [False, True])
+def test_render_follows_output_symlink_and_publishes_beside_target(monkeypatch, tmp_path, existing_target):
+    import io
+    target_dir = tmp_path / "releases"
+    target_dir.mkdir()
+    target = target_dir / "v1.svg"
+    if existing_target:
+        target.write_bytes(b"original")
+    output = tmp_path / "current.svg"
+    output.symlink_to("releases/v1.svg")
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"new render"))
+    real_replace = os.replace
+    published = []
+    def record_replace(source, destination):
+        published.append((os.path.dirname(source), os.path.abspath(destination)))
+        return real_replace(source, destination)
+    monkeypatch.setattr(os, "replace", record_replace)
+    session = Session()
+    session.new_project()
+    result = export_mod.render(session, str(output), fmt="svg", overwrite=True)
+    assert output.is_symlink()
+    assert os.readlink(output) == "releases/v1.svg"
+    assert target.read_bytes() == b"new render"
+    assert output.read_bytes() == b"new render"
+    assert published == [(str(target_dir), str(target))]
+    assert result["output"] == str(output)
+    assert not list(tmp_path.rglob(".mermaid-*"))
+
+
+@pytest.mark.parametrize("failure_mode", ["size", "replace"])
+def test_render_failure_preserves_output_symlink_and_target(monkeypatch, tmp_path, failure_mode):
+    import io
+    target_dir = tmp_path / "releases"
+    target_dir.mkdir()
+    target = target_dir / "v1.svg"
+    target.write_bytes(b"original")
+    output = tmp_path / "current.svg"
+    output.symlink_to("releases/v1.svg")
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"new render"))
+    if failure_mode == "size":
+        monkeypatch.setattr(os.path, "getsize", lambda path: 0)
+    else:
+        def fail_replace(source, destination):
+            raise OSError("replace denied")
+        monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(RuntimeError, match="Could not write"):
+        mermaid_backend.render_to_file("pako:x", str(output), "svg")
+    assert output.is_symlink()
+    assert target.read_bytes() == b"original"
+    assert not list(tmp_path.rglob(".mermaid-*"))
+
+
+def test_cli_overwrite_updates_symlink_target(monkeypatch, tmp_path):
+    import io
+    from click.testing import CliRunner
+    from cli_anything.mermaid import mermaid_cli
+    target = tmp_path / "v1.svg"
+    target.write_bytes(b"original")
+    output = tmp_path / "current.svg"
+    output.symlink_to("v1.svg")
+    project = tmp_path / "diagram.mermaid.json"
+    runner = CliRunner()
+    created = runner.invoke(mermaid_cli.cli, ["project", "new", "-o", str(project)])
+    assert created.exit_code == 0, created.output
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"new render"))
+    result = runner.invoke(mermaid_cli.cli, ["--project", str(project), "--json", "export", "render", str(output), "--overwrite"])
+    assert result.exit_code == 0, result.output
+    assert output.is_symlink()
+    assert target.read_bytes() == b"new render"
