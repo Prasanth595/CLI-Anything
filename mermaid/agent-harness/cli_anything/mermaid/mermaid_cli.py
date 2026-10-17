@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import errno
 
 import click
 
@@ -47,6 +48,8 @@ class _CleanErrorGroup(click.Group):
             # Click control flow (e.g. --help exits 0 via Exit, a RuntimeError subclass).
             raise
         except (RuntimeError, ValueError, OSError) as exc:
+            if isinstance(exc, OSError) and exc.errno == errno.EPIPE:
+                raise  # Click's outer main() owns quiet broken-pipe handling.
             raise click.ClickException(str(exc)) from exc
 
 

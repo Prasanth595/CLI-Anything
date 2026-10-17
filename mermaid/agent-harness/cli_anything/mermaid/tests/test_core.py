@@ -209,7 +209,7 @@ def test_render_success_publishes_complete_output(monkeypatch, tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["out.svg"]
 
 
-@pytest.mark.parametrize("failure_mode", ["size", "replace"])
+@pytest.mark.parametrize("failure_mode", ["size", "replace", "chmod"])
 def test_render_publish_failure_preserves_destination(monkeypatch, tmp_path, failure_mode):
     import io
     data = b"<svg>complete</svg>"
@@ -218,6 +218,10 @@ def test_render_publish_failure_preserves_destination(monkeypatch, tmp_path, fai
     target.write_bytes(b"original")
     if failure_mode == "size":
         monkeypatch.setattr(os.path, "getsize", lambda path: 0)
+    elif failure_mode == "chmod":
+        def fail_chmod(path, mode):
+            raise OSError("simulated chmod failure")
+        monkeypatch.setattr(os, "chmod", fail_chmod)
     else:
         def fail_replace(source, destination):
             raise OSError("simulated replace failure")
@@ -272,3 +276,67 @@ def test_render_fdopen_failure_closes_descriptor(monkeypatch, tmp_path):
         except OSError:
             pass
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode contract")
+@pytest.mark.parametrize("mask,expected", [(0o022, 0o644), (0o077, 0o600)])
+def test_new_render_respects_creation_umask(monkeypatch, tmp_path, mask, expected):
+    import io
+    import stat
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"<svg/>"))
+    target = tmp_path / "out.svg"
+    previous = os.umask(mask)
+    try:
+        mermaid_backend.render_to_file("pako:x", str(target), "svg")
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(target.stat().st_mode) == expected
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode contract")
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o444])
+def test_render_preserves_existing_destination_mode(monkeypatch, tmp_path, mode):
+    import io
+    import stat
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"<svg/>"))
+    target = tmp_path / "out.svg"
+    target.write_bytes(b"original")
+    target.chmod(mode)
+    previous = os.umask(0o077)
+    try:
+        mermaid_backend.render_to_file("pako:x", str(target), "svg")
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert target.read_bytes() == b"<svg/>"
+
+
+@pytest.mark.parametrize("number,clean_error", [(32, False), (28, True)])
+def test_cli_leaves_broken_pipe_handling_to_click(monkeypatch, number, clean_error):
+    import errno
+    from click.testing import CliRunner
+    from cli_anything.mermaid import mermaid_cli
+
+    def broken_output(*args, **kwargs):
+        raise OSError(number, "output failed")
+    monkeypatch.setattr(mermaid_cli.click, "echo", broken_output)
+    result = CliRunner().invoke(mermaid_cli.cli, ["project", "samples"])
+    assert result.exit_code == 1
+    assert ("Error:" in result.output) == clean_error
+    if not clean_error:
+        assert "output failed" not in result.output
+
+
+
+def test_render_exclusive_creation_never_removes_a_collision(monkeypatch, tmp_path):
+    import io
+    monkeypatch.setattr(mermaid_backend.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"<svg/>"))
+    monkeypatch.setattr(mermaid_backend.secrets, "token_hex", lambda count: "collision")
+    collision = tmp_path / ".mermaid-collision"
+    collision.write_bytes(b"another writer")
+    target = tmp_path / "out.svg"
+    target.write_bytes(b"original")
+    with pytest.raises(RuntimeError, match="Could not write"):
+        mermaid_backend.render_to_file("pako:x", str(target), "svg")
+    assert collision.read_bytes() == b"another writer"
+    assert target.read_bytes() == b"original"
