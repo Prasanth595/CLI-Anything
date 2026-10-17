@@ -2,7 +2,7 @@ from setuptools import setup, find_namespace_packages
 
 setup(
     name="cli-anything-adguardhome",
-    version="1.0.1",
+    version="1.0.2",
     description="CLI harness for AdGuardHome - control your ad blocker from the command line",
     packages=find_namespace_packages(include=["cli_anything.*"]),
     install_requires=[

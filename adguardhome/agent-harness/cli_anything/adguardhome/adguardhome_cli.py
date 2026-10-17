@@ -531,12 +531,13 @@ def stats_reset(ctx: click.Context):
 
 
 @stats_.command("config")
-@click.option("--interval", type=int, default=None, help="Retention in days")
+@click.option("--interval", type=click.IntRange(min=1), default=None,
+              help="Retention in days (the API reports it in milliseconds)")
 @click.pass_context
 def stats_config(ctx: click.Context, interval):
     client = make_client(ctx)
     if interval is not None:
-        output(stats_core.set_stats_config(client, interval), ctx.obj["as_json"])
+        output(stats_core.set_stats_config(client, interval_days=interval), ctx.obj["as_json"])
     else:
         output(stats_core.get_stats_config(client), ctx.obj["as_json"])
 
@@ -563,16 +564,14 @@ def log_show(ctx: click.Context, limit: int, offset: int):
 
 @log_.command("config")
 @click.option("--enabled/--disabled", default=None)
-@click.option("--interval", type=int, default=None)
+@click.option("--interval", type=click.IntRange(min=1), default=None,
+              help="Retention in days (the API reports it in milliseconds)")
 @click.pass_context
 def log_config(ctx: click.Context, enabled, interval):
     client = make_client(ctx)
     if enabled is not None or interval is not None:
-        current = log_core.get_log_config(client)
-        effective_enabled = enabled if enabled is not None else current.get("enabled", True)
-        effective_interval = interval if interval is not None else current.get("interval", 90)
-        output(log_core.set_log_config(client, enabled=effective_enabled,
-                                  interval=effective_interval), ctx.obj["as_json"])
+        output(log_core.set_log_config(client, enabled=enabled, interval_days=interval),
+               ctx.obj["as_json"])
     else:
         output(log_core.get_log_config(client), ctx.obj["as_json"])
 

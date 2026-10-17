@@ -12,7 +12,7 @@ import pytest
 import requests
 
 from cli_anything.adguardhome.utils.adguardhome_backend import AdGuardHomeClient
-from cli_anything.adguardhome.core import project, filtering, blocking, clients, rewrite
+from cli_anything.adguardhome.core import project, filtering, blocking, clients, rewrite, log, stats
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +92,14 @@ class TestAdGuardHomeClient:
             result = c.post("/restart")
             assert result == {}
             mock_post.assert_called_once()
+
+    def test_put_json(self):
+        c = make_client()
+        resp = mock_response({})
+        with patch.object(c.session, "put", return_value=resp) as mock_put:
+            c.put("/querylog/config/update", {"enabled": True})
+            assert mock_put.call_args.args[0] == "http://localhost:3000/control/querylog/config/update"
+            assert mock_put.call_args.kwargs.get("json") == {"enabled": True}
 
     def test_connection_error_docker_hint_maps_to_container_port(self):
         client = AdGuardHomeClient(host="localhost", port=3001)
@@ -262,3 +270,70 @@ class TestRewrite:
             body = mock_post.call_args.kwargs["json"]
             assert body["domain"] == "myserver.local"
             assert body["answer"] == "192.168.1.50"
+
+
+# ---------------------------------------------------------------------------
+# log.py
+# ---------------------------------------------------------------------------
+
+LOG_CONFIG = {
+    "enabled": True,
+    "interval": 90 * 86_400_000,
+    "anonymize_client_ip": True,
+    "ignored": ["example.org"],
+    "ignored_enabled": True,
+}
+
+
+class TestLog:
+    def test_get_log_config(self):
+        c = make_client()
+        with patch.object(c.session, "get", return_value=mock_response(LOG_CONFIG)) as mock_get:
+            assert log.get_log_config(c) == LOG_CONFIG
+            assert mock_get.call_args.args[0].endswith("/control/querylog/config")
+
+    def test_set_log_config_interval_in_ms_keeps_other_fields(self):
+        c = make_client()
+        with patch.object(c.session, "get", return_value=mock_response(dict(LOG_CONFIG))):
+            with patch.object(c.session, "put", return_value=mock_response()) as mock_put:
+                log.set_log_config(c, interval_days=7)
+                assert mock_put.call_args.args[0].endswith("/control/querylog/config/update")
+                body = mock_put.call_args.kwargs["json"]
+                assert body == {**LOG_CONFIG, "interval": 7 * 86_400_000}
+
+    def test_set_log_config_enabled_only(self):
+        c = make_client()
+        with patch.object(c.session, "get", return_value=mock_response(dict(LOG_CONFIG))):
+            with patch.object(c.session, "put", return_value=mock_response()) as mock_put:
+                log.set_log_config(c, enabled=False)
+                body = mock_put.call_args.kwargs["json"]
+                assert body == {**LOG_CONFIG, "enabled": False}
+
+
+# ---------------------------------------------------------------------------
+# stats.py
+# ---------------------------------------------------------------------------
+
+STATS_CONFIG = {
+    "enabled": True,
+    "interval": 86_400_000,
+    "ignored": ["example.org"],
+    "ignored_enabled": True,
+}
+
+
+class TestStats:
+    def test_get_stats_config(self):
+        c = make_client()
+        with patch.object(c.session, "get", return_value=mock_response(STATS_CONFIG)) as mock_get:
+            assert stats.get_stats_config(c) == STATS_CONFIG
+            assert mock_get.call_args.args[0].endswith("/control/stats/config")
+
+    def test_set_stats_config_interval_in_ms_keeps_other_fields(self):
+        c = make_client()
+        with patch.object(c.session, "get", return_value=mock_response(dict(STATS_CONFIG))):
+            with patch.object(c.session, "put", return_value=mock_response()) as mock_put:
+                stats.set_stats_config(c, interval_days=30)
+                assert mock_put.call_args.args[0].endswith("/control/stats/config/update")
+                body = mock_put.call_args.kwargs["json"]
+                assert body == {**STATS_CONFIG, "interval": 30 * 86_400_000}

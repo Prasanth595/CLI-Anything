@@ -2,8 +2,8 @@
 
 ## Test Inventory Plan
 
-- `test_core.py`: 20 unit tests (no real AdGuardHome needed)
-- `test_full_e2e.py`: 12 E2E + subprocess tests (Docker AdGuardHome on port 3001)
+- `test_core.py`: 31 unit tests (no real AdGuardHome needed)
+- `test_full_e2e.py`: 18 E2E + subprocess tests (Docker AdGuardHome on port 3001)
 
 ## Unit Test Plan (test_core.py)
 
@@ -15,6 +15,7 @@
 - `test_get_empty_response` - GET returns {} on empty body
 - `test_post_json` - POST sends JSON body
 - `test_post_empty` - POST with no data
+- `test_put_json` - PUT sends JSON body
 - `test_connection_error_raises_runtime` - ConnectionError raises RuntimeError with instructions
 
 ### project.py
@@ -42,6 +43,15 @@
 - `test_list_rewrites` - calls GET /rewrite/list
 - `test_add_rewrite` - calls POST /rewrite/add
 
+### log.py
+- `test_get_log_config` - calls GET /querylog/config
+- `test_set_log_config_interval_in_ms_keeps_other_fields` - PUT /querylog/config/update with the interval in ms, other fields untouched
+- `test_set_log_config_enabled_only` - toggling enabled keeps interval and the other fields
+
+### stats.py
+- `test_get_stats_config` - calls GET /stats/config
+- `test_set_stats_config_interval_in_ms_keeps_other_fields` - PUT /stats/config/update with the interval in ms, other fields untouched
+
 ## E2E Test Plan (test_full_e2e.py)
 
 ### Setup
@@ -58,6 +68,12 @@
 - `test_filter_list` - list filters on fresh instance
 - `test_rewrite_add_and_list` - add rewrite, verify in list
 - `test_rewrite_remove` - remove rewrite, verify gone
+
+### Workflow: Log and stats retention (requires Docker AdGuardHome)
+- `test_log_config_show_json` - `--json log config` returns the current settings
+- `test_log_config_update_interval` - `log config --interval 7` stores 7 days (604800000 ms)
+- `test_stats_config_show_json` - `--json stats config` returns the current settings
+- `test_stats_config_update_interval` - `stats config --interval 7` stores 7 days (604800000 ms)
 
 ---
 

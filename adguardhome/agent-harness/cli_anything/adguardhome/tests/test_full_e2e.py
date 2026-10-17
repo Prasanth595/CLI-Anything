@@ -294,3 +294,34 @@ class TestDockerE2E:
         data = json.loads(result.stdout)
         print(f"\n  Config test: {data}")
         assert data.get("connected") is True
+
+    def test_log_config_show_json(self, agh_docker):
+        result = self._run_agh(["--json", "log", "config"], agh_docker, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        print(f"\n  Log config: {data}")
+        assert "interval" in data and "enabled" in data
+
+    def test_log_config_update_interval(self, agh_docker):
+        result = self._run_agh(["--json", "log", "config", "--interval", "7"],
+                               agh_docker, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        print(f"\n  Log config after update: {data}")
+        assert data["interval"] == 7 * 24 * 60 * 60 * 1000
+        assert data["enabled"] is True
+
+    def test_stats_config_show_json(self, agh_docker):
+        result = self._run_agh(["--json", "stats", "config"], agh_docker, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        print(f"\n  Stats config: {data}")
+        assert "interval" in data
+
+    def test_stats_config_update_interval(self, agh_docker):
+        result = self._run_agh(["--json", "stats", "config", "--interval", "7"],
+                               agh_docker, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        print(f"\n  Stats config after update: {data}")
+        assert data["interval"] == 7 * 24 * 60 * 60 * 1000
