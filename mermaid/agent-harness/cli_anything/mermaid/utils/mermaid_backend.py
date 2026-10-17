@@ -40,6 +40,54 @@ def build_live_url(serialized: str, mode: str) -> str:
 
 
 
+def _capture_output_links(path: str) -> dict[str, tuple]:
+    """Record named symlink entries, including links in their target paths."""
+    references = {}
+    pending = [path]
+    expanded = set()
+    while pending:
+        candidate = pending.pop()
+        drive, tail = os.path.splitdrive(candidate)
+        if os.altsep:
+            tail = tail.replace(os.altsep, os.sep)
+        cursor = drive + os.sep if tail.startswith(os.sep) else drive
+        for component in tail.split(os.sep):
+            if not component:
+                continue
+            cursor = os.path.join(cursor, component)
+            try:
+                entry = os.lstat(cursor)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISLNK(entry.st_mode):
+                continue
+            target = os.readlink(cursor)
+            reference = (entry.st_dev, entry.st_ino, entry.st_ctime_ns, target)
+            if cursor in references and references[cursor] != reference:
+                raise OSError("Requested output path changed while inspecting links")
+            references[cursor] = reference
+            identity = (entry.st_dev, entry.st_ino)
+            if identity not in expanded:
+                expanded.add(identity)
+                pending.append(target if os.path.isabs(target) else os.path.join(os.path.dirname(cursor), target))
+    return references
+
+
+def _revalidate_output_path(path: str, destination: str, links: dict[str, tuple]) -> None:
+    """Refuse known link rotations; the final check/rename is not atomic CAS."""
+    if os.path.realpath(path) != destination:
+        raise OSError("Requested output path changed while rendering")
+    for entry_path, expected in links.items():
+        try:
+            entry = os.lstat(entry_path)
+            current = (entry.st_dev, entry.st_ino, entry.st_ctime_ns,
+                       os.readlink(entry_path) if stat.S_ISLNK(entry.st_mode) else None)
+        except OSError as exc:
+            raise OSError("Requested output path changed while rendering") from exc
+        if current != expected:
+            raise OSError("Requested output path changed while rendering")
+
+
 def _read_destination(path: str) -> os.stat_result | None:
     try:
         current = os.lstat(path)
@@ -136,7 +184,8 @@ def _preserve_destination_metadata(source: str, staged: str, original: os.stat_r
         # Unlike shutil.copystat, do not silently ignore access-control errors.
         attributes = {
             name: os.getxattr(source, name) for name in os.listxattr(source)
-            if name != "security.capability"
+            # Privileges and integrity attestations bind the previous bytes/inode.
+            if name not in {"security.capability", "security.ima", "security.evm"}
         }
         for name in os.listxattr(staged):
             if name not in attributes:
@@ -163,7 +212,10 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
     if output_path.endswith(separators):
         raise RuntimeError(f"Could not write {output_path}: output path denotes a directory")
     try:
-        destination_path = os.path.realpath(output_path)
+        requested_path = output_path if os.path.isabs(output_path) else os.path.join(os.getcwd(), output_path)
+        destination_path = os.path.realpath(requested_path)
+        output_links = _capture_output_links(requested_path)
+        _revalidate_output_path(requested_path, destination_path, output_links)
         original = _read_destination(destination_path)
         if original is not None and not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise OSError("Preserving overwrite access controls is supported only on macOS and Linux")
@@ -184,7 +236,8 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
     temporary_path = None
     pending_fd = None
     try:
-        # The network wait may outlive a chmod, replacement, or new hard link.
+        # The network wait may outlive a link rotation or destination change.
+        _revalidate_output_path(requested_path, destination_path, output_links)
         original = _refresh_destination(destination_path, original)
         parent = os.path.dirname(destination_path)
         if parent:
@@ -205,12 +258,14 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
             raise OSError("Incomplete renderer output file")
         # Re-read once more after staging, so a known newer access-control
         # choice is preserved rather than restoring the pre-write snapshot.
+        _revalidate_output_path(requested_path, destination_path, output_links)
         original = _refresh_destination(destination_path, original)
         if original is not None:
             _preserve_destination_metadata(destination_path, temporary_path, original)
         current = _refresh_destination(destination_path, original)
         if current is not None and _metadata_version(current) != _metadata_version(original):
             raise OSError("Output destination metadata changed while staging")
+        _revalidate_output_path(requested_path, destination_path, output_links)
         os.replace(temporary_path, destination_path)
     except OSError as exc:
         raise RuntimeError(f"Could not write {output_path}: {exc}") from exc

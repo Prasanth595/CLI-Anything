@@ -221,7 +221,7 @@ def test_same_inode_reached_through_new_symlink_is_not_published_over(renderer, 
         target.symlink_to(previous.name)
 
     renderer(change_entry)
-    with pytest.raises(RuntimeError, match="not a regular file|identity changed"):
+    with pytest.raises(RuntimeError, match="Requested output path changed"):
         mermaid_backend.render_to_file("pako:x", str(target), "svg")
     assert target.is_symlink()
     assert target.read_bytes() == previous.read_bytes() == b"original"
@@ -291,3 +291,99 @@ def test_target_acl_is_installed_before_stage_mode_is_widened(monkeypatch, rende
     assert widened == [True]
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
     assert subprocess.check_output(["/bin/ls", "-le", str(target)], text=True).splitlines()[1:] == expected_acl
+
+
+@pytest.mark.parametrize("phase", ["fetch", "staging", "metadata"])
+@pytest.mark.parametrize("rotation", ["retarget", "remove", "same_target"])
+def test_output_symlink_rotation_refuses_stale_target(monkeypatch, renderer, tmp_path, phase, rotation):
+    first = tmp_path / "a.svg"
+    second = tmp_path / "b.svg"
+    output = tmp_path / "current.svg"
+    first.write_bytes(b"first original")
+    second.write_bytes(b"second original")
+    output.symlink_to(first.name)
+    changes = []
+
+    def rotate():
+        if changes:
+            return
+        changes.append(True)
+        # Keep the old entry alive for an unambiguous replacement identity.
+        output.rename(tmp_path / "previous-link.svg")
+        if rotation != "remove":
+            output.symlink_to(second.name if rotation == "retarget" else first.name)
+
+    renderer(rotate if phase == "fetch" else lambda: None)
+    if phase == "staging":
+        fdopen = os.fdopen
+        class Writer:
+            def __init__(self, file): self.file = file
+            def __enter__(self):
+                self.file.__enter__()
+                return self
+            def __exit__(self, *args): return self.file.__exit__(*args)
+            def write(self, data):
+                written = self.file.write(data)
+                rotate()
+                return written
+        monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: Writer(fdopen(fd, *a, **k)))
+    elif phase == "metadata":
+        preserve = mermaid_backend._preserve_destination_metadata
+        def change_after_metadata(*args):
+            preserve(*args)
+            rotate()
+        monkeypatch.setattr(mermaid_backend, "_preserve_destination_metadata", change_after_metadata)
+    with pytest.raises(RuntimeError, match="output path changed"):
+        mermaid_backend.render_to_file("pako:x", str(output), "svg")
+    assert changes
+    assert first.read_bytes() == b"first original"
+    assert second.read_bytes() == b"second original"
+    if rotation == "remove":
+        assert not output.exists() and not output.is_symlink()
+    else:
+        assert output.is_symlink()
+        assert os.readlink(output) == (second.name if rotation == "retarget" else first.name)
+    assert not list(tmp_path.glob(".mermaid-*"))
+
+
+@pytest.mark.parametrize("same_target", [False, True])
+def test_output_link_chain_rotation_is_revalidated(renderer, tmp_path, same_target):
+    first = tmp_path / "a.svg"
+    second = tmp_path / "b.svg"
+    first.write_bytes(b"first original")
+    second.write_bytes(b"second original")
+    pivot = tmp_path / "release-link.svg"
+    pivot.symlink_to(first.name)
+    output = tmp_path / "current.svg"
+    output.symlink_to(pivot.name)
+
+    def rotate():
+        pivot.rename(tmp_path / "previous-release-link.svg")
+        pivot.symlink_to(first.name if same_target else second.name)
+
+    renderer(rotate)
+    with pytest.raises(RuntimeError, match="output path changed"):
+        mermaid_backend.render_to_file("pako:x", str(output), "svg")
+    assert output.is_symlink() and pivot.is_symlink()
+    assert first.read_bytes() == b"first original"
+    assert second.read_bytes() == b"second original"
+    assert not list(tmp_path.glob(".mermaid-*"))
+
+
+def test_linux_content_integrity_metadata_is_not_rebound_to_render_bytes(monkeypatch, tmp_path):
+    """Explicit Linux branch emulation, not native IMA/EVM appraisal coverage."""
+    source = tmp_path / "out.svg"
+    staged = tmp_path / "stage.svg"
+    source.write_bytes(b"old bytes")
+    staged.write_bytes(b"new bytes")
+    content_bound = {"security.ima": b"old-content-signature", "security.evm": b"old-inode-hmac", "security.capability": b"old-privilege"}
+    ordinary = {"security.selinux": b"label", "system.posix_acl_access": b"acl", "user.note": b"annotation"}
+    attributes = {str(source): dict(content_bound, **ordinary), str(staged): dict(content_bound)}
+    monkeypatch.setattr(mermaid_backend.sys, "platform", "linux")
+    monkeypatch.setattr(os, "listxattr", lambda path: list(attributes[str(path)]), raising=False)
+    monkeypatch.setattr(os, "getxattr", lambda path, name: attributes[str(path)][name], raising=False)
+    monkeypatch.setattr(os, "setxattr", lambda path, name, value: attributes[str(path)].__setitem__(name, value), raising=False)
+    monkeypatch.setattr(os, "removexattr", lambda path, name: attributes[str(path)].pop(name), raising=False)
+    mermaid_backend._preserve_destination_metadata(str(source), str(staged), source.stat())
+    assert attributes[str(staged)] == ordinary
+    assert attributes[str(source)] == dict(content_bound, **ordinary)

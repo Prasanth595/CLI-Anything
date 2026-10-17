@@ -77,14 +77,17 @@ New render outputs follow the process umask. Existing-file overwrites use a
 same-directory owner-only staging file with inherited reader ACLs cleared, then
 preserve ownership, ordinary permissions, ACLs
 and labels on macOS and Linux before publication. Changed bytes never inherit
-setuid/setgid bits or Linux `security.capability`. A metadata-copy error leaves the
+setuid/setgid bits or Linux `security.capability`, `security.ima`, or
+`security.evm`; content-bound privilege/integrity metadata is not copied from old
+bytes onto the replacement. A metadata-copy error leaves the
 original intact and returns a clean error. Directory-shaped paths ending in a
 separator are rejected before contacting the renderer.
 
 Multiply hard-linked outputs are refused, since replacing one directory entry
 would leave their aliases with old content. Destination identity and metadata
 are re-read after the renderer request and before publication: known inode
-replacement, creation/deletion, hard-link changes or a metadata change during
+replacement, creation/deletion, output-link rotation/removal (including chained
+links and same-target link replacement), hard-link changes or a metadata change during
 copy cause an error; a newer mode observed before copying is preserved. These
 checks are best-effort detection, not an atomic compare-and-swap with rename;
 arbitrary concurrent writers can still race the final check and publication.
