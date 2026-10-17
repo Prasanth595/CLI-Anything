@@ -55,6 +55,17 @@ def test_required_fields_and_contributors_shape(fname):
         optional = {"install_cmd"} if source == "public" and strategy in {"npm", "bundled"} else set()
         missing = REQUIRED - c.keys() - optional
         assert not missing, f"{c.get('name')} missing {sorted(missing)}"
+        # Search, category listing, display, execution, and installed-state
+        # consumers rely on actual text, not merely the presence of these keys.
+        for field in ("name", "display_name", "version", "description", "homepage", "entry_point", "category"):
+            assert isinstance(c[field], str) and c[field].strip(), (
+                f"{c.get('name')}: {field} must be nonblank text"
+            )
+        # These fields explicitly permit null in the contributor contract.
+        for field in ("requires", "source_url", "skill_md"):
+            assert c[field] is None or isinstance(c[field], str), (
+                f"{c['name']}: {field} must be text or null"
+            )
         if "install_cmd" not in optional:
             assert isinstance(c["install_cmd"], str) and c["install_cmd"].strip(), (
                 f"{c['name']} requires an install command for {strategy}"
@@ -70,7 +81,11 @@ def test_required_fields_and_contributors_shape(fname):
             f"{c['name']} needs at least one contributor"
         )
         for ct in c["contributors"]:
-            assert ct.get("name") and ct.get("url")
+            assert isinstance(ct, dict), f"{c['name']}: contributor must be an object"
+            for field in ("name", "url"):
+                assert isinstance(ct.get(field), str) and ct[field].strip(), (
+                    f"{c['name']}: contributor {field} must be nonblank text"
+                )
 
 
 @pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
@@ -228,3 +243,62 @@ def test_local_skill_cannot_reference_another_entry(monkeypatch, name, skill):
     monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [{"name": name, "skill_md": skill}])
     with pytest.raises(AssertionError):
         test_in_repo_skill_md_paths_exist("registry.json")
+
+
+@pytest.mark.parametrize("field", [
+    "name", "display_name", "version", "description", "homepage", "entry_point", "category",
+])
+@pytest.mark.parametrize("value", [None, "", "  ", False, 7, [], {}])
+def test_required_text_fields_reject_non_text_and_blank_values(monkeypatch, field, value):
+    import sys
+    entry = dict(_load("registry.json")[0], **{field: value})
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape("registry.json")
+
+
+@pytest.mark.parametrize("field", ["requires", "source_url", "skill_md"])
+@pytest.mark.parametrize("value", [False, 7, [], {}])
+def test_nullable_text_fields_reject_non_text_values(monkeypatch, field, value):
+    import sys
+    entry = dict(_load("registry.json")[0], **{field: value})
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape("registry.json")
+
+
+@pytest.mark.parametrize("contributor", [None, "author", {}, {"name": 7, "url": "https://example.com"},
+                                        {"name": "author", "url": False}, {"name": "  ", "url": "https://example.com"}])
+def test_contributors_require_objects_with_nonblank_text(monkeypatch, contributor):
+    import sys
+    entry = dict(_load("registry.json")[0], contributors=[contributor])
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match="contributor"):
+        test_required_fields_and_contributors_shape("registry.json")
+
+
+def test_nullable_metadata_remains_usable_by_real_registry_consumers(monkeypatch):
+    import sys
+    from cli_hub import registry
+    entry = dict(_load("registry.json")[0], requires=None, source_url=None, skill_md=None)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    test_required_fields_and_contributors_shape("registry.json")
+    monkeypatch.setattr(registry, "fetch_all_clis", lambda *args: [entry])
+    assert registry.get_cli(entry["name"].upper()) == entry
+    assert registry.search_clis(entry["description"]) == [entry]
+    assert registry.search_clis("no-such-registry-search-token") == []
+    assert registry.list_categories() == [entry["category"]]
+
+
+@pytest.mark.parametrize("field", ["name", "description", "category", "display_name"])
+def test_text_contract_guards_real_search_consumer(monkeypatch, field):
+    import sys
+    from cli_hub import registry
+    entry = dict(_load("registry.json")[0], **{field: None})
+    monkeypatch.setattr(registry, "fetch_all_clis", lambda *args: [entry])
+    # The consumer really dereferences these strings; this is not an invented schema rule.
+    with pytest.raises(AttributeError):
+        registry.search_clis("no-such-registry-search-token")
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape("registry.json")
