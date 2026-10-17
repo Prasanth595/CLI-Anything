@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import secrets
@@ -39,39 +40,119 @@ def build_live_url(serialized: str, mode: str) -> str:
 
 
 
+def _read_destination(path: str) -> os.stat_result | None:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(current.st_mode):
+        raise OSError("Output destination is not a regular file")
+    if current.st_nlink != 1:
+        raise OSError("Refusing hard-linked output: replacing one name would leave aliases unchanged")
+    return current
+
+
+def _refresh_destination(path: str, previous: os.stat_result | None) -> os.stat_result | None:
+    """Detect a replaced/created destination; re-read access controls after waits.
+
+    This is a best-effort check, not an atomic compare-and-swap with rename.
+    """
+    current = _read_destination(path)
+    if (current is None) != (previous is None) or (
+        current is not None and previous is not None
+        and (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino)
+    ):
+        raise OSError("Output destination identity changed while rendering")
+    return current
+
+
+def _metadata_version(value: os.stat_result) -> tuple:
+    return (value.st_mode, value.st_uid, value.st_gid, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _set_macos_acl(source: str | None, staged: str) -> None:
+    """Copy the exact ACL, or install an empty ACL for private staging."""
+    import ctypes
+    native = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    native.acl_init.argtypes = [ctypes.c_int]
+    native.acl_init.restype = ctypes.c_void_p
+    native.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    native.acl_get_file.restype = ctypes.c_void_p
+    native.acl_set_file.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p]
+    native.acl_set_file.restype = ctypes.c_int
+    native.acl_free.argtypes = [ctypes.c_void_p]
+    native.acl_free.restype = ctypes.c_int
+    # sys/acl.h: ACL_TYPE_EXTENDED = 0x00000100.
+    acl = native.acl_get_file(os.fsencode(source), 0x100) if source is not None else native.acl_init(0)
+    if not acl and source is not None and ctypes.get_errno() == errno.ENOENT:
+        # macOS also returns ENOENT for an existing file with no extended ACL.
+        # Require the entry to exist; the caller revalidates its identity later.
+        os.lstat(source)
+        acl = native.acl_init(0)
+    if not acl:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number))
+    try:
+        if native.acl_set_file(os.fsencode(staged), 0x100, acl) != 0:
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number))
+    finally:
+        native.acl_free(acl)
+
+
+def _make_staging_private(path: str) -> None:
+    """Remove inherited reader ACLs before any overwrite content is written."""
+    if sys.platform == "darwin":
+        _set_macos_acl(None, path)
+    elif sys.platform.startswith("linux"):
+        if "system.posix_acl_access" in os.listxattr(path):
+            os.removexattr(path, "system.posix_acl_access")
+    else:
+        raise OSError("Private overwrite staging is supported only on macOS and Linux")
+    os.chmod(path, 0o600)
+
+
 def _preserve_destination_metadata(source: str, staged: str, original: os.stat_result) -> None:
-    """Keep POSIX access controls when atomically replacing an existing file."""
+    """Keep ordinary access controls, excluding executable-content privileges."""
     current = os.stat(staged)
     if (current.st_uid, current.st_gid) != (original.st_uid, original.st_gid):
         os.chown(staged, original.st_uid, original.st_gid)
-    os.chmod(staged, stat.S_IMODE(original.st_mode))
+    ordinary_mode = stat.S_IMODE(original.st_mode) & ~(stat.S_ISUID | stat.S_ISGID)
     if sys.platform == "darwin":
-        # copyfile.h: COPYFILE_ACL (1<<0) | COPYFILE_XATTR (1<<2).
+        # copyfile.h: COPYFILE_XATTR (1<<2). Copy ACLs explicitly because
+        # copyfile merges inherited ACL entries instead of copying them exactly.
         # Python's os xattr APIs are Linux-only; use macOS's metadata copier.
         import ctypes
         native = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         copyfile = native.copyfile
         copyfile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
         copyfile.restype = ctypes.c_int
-        if copyfile(os.fsencode(source), os.fsencode(staged), None, 5) != 0:
+        if copyfile(os.fsencode(source), os.fsencode(staged), None, 4) != 0:
             number = ctypes.get_errno()
             raise OSError(number, os.strerror(number))
+        _set_macos_acl(source, staged)
     elif sys.platform.startswith("linux"):
         # Linux stores POSIX ACLs and security labels in extended attributes.
         # Unlike shutil.copystat, do not silently ignore access-control errors.
-        attributes = {name: os.getxattr(source, name) for name in os.listxattr(source)}
+        attributes = {
+            name: os.getxattr(source, name) for name in os.listxattr(source)
+            if name != "security.capability"
+        }
         for name in os.listxattr(staged):
             if name not in attributes:
                 os.removexattr(staged, name)
         for name, value in attributes.items():
             os.setxattr(staged, name, value)
-        if {name: os.getxattr(staged, name) for name in os.listxattr(staged)} != attributes:
-            raise OSError("Could not preserve destination extended attributes")
     else:
         raise OSError("Preserving overwrite access controls is supported only on macOS and Linux")
+    # Do not widen the private stage's mode until its destination ACL is in place.
+    os.chmod(staged, ordinary_mode)
+    if sys.platform.startswith("linux"):
+        if {name: os.getxattr(staged, name) for name in os.listxattr(staged)} != attributes:
+            raise OSError("Could not preserve destination extended attributes")
     after = os.stat(staged)
     if (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode)) != (
-        original.st_uid, original.st_gid, stat.S_IMODE(original.st_mode)
+        original.st_uid, original.st_gid, ordinary_mode
     ):
         raise OSError("Could not preserve destination ownership and mode")
 
@@ -83,10 +164,7 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
         raise RuntimeError(f"Could not write {output_path}: output path denotes a directory")
     try:
         destination_path = os.path.realpath(output_path)
-        try:
-            original = os.stat(destination_path)
-        except FileNotFoundError:
-            original = None
+        original = _read_destination(destination_path)
         if original is not None and not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise OSError("Preserving overwrite access controls is supported only on macOS and Linux")
     except OSError as exc:
@@ -106,16 +184,17 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
     temporary_path = None
     pending_fd = None
     try:
+        # The network wait may outlive a chmod, replacement, or new hard link.
+        original = _refresh_destination(destination_path, original)
         parent = os.path.dirname(destination_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        destination_mode = stat.S_IMODE(original.st_mode) if original is not None else None
         candidate_path = os.path.join(parent, f".mermaid-{secrets.token_hex(16)}")
-        creation_mode = destination_mode if destination_mode is not None else 0o666
+        creation_mode = 0o600 if original is not None else 0o666
         pending_fd = os.open(candidate_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, creation_mode)
         temporary_path = candidate_path  # Cleanup only a file we created successfully.
         if original is not None:
-            _preserve_destination_metadata(destination_path, temporary_path, original)
+            _make_staging_private(temporary_path)
         output_file = os.fdopen(pending_fd, "wb")
         pending_fd = None  # The file object now owns the descriptor.
         with output_file as fh:
@@ -124,8 +203,14 @@ def render_to_file(serialized: str, output_path: str, fmt: str) -> dict:
         file_size = os.path.getsize(temporary_path)
         if file_size != len(data):
             raise OSError("Incomplete renderer output file")
+        # Re-read once more after staging, so a known newer access-control
+        # choice is preserved rather than restoring the pre-write snapshot.
+        original = _refresh_destination(destination_path, original)
         if original is not None:
             _preserve_destination_metadata(destination_path, temporary_path, original)
+        current = _refresh_destination(destination_path, original)
+        if current is not None and _metadata_version(current) != _metadata_version(original):
+            raise OSError("Output destination metadata changed while staging")
         os.replace(temporary_path, destination_path)
     except OSError as exc:
         raise RuntimeError(f"Could not write {output_path}: {exc}") from exc

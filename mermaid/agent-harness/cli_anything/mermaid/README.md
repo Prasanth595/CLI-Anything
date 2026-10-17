@@ -61,7 +61,7 @@ cli-anything-mermaid --project diagram.mermaid.json
 
 - Project files are stored as `.mermaid.json`
 - Rendered output is produced through the same serialized state payload the live editor uses
-- Overwriting a symlink updates its resolved target and keeps the link. Output is staged beside the target; existing restrictive permissions apply while the staged content is written.
+- Overwriting a symlink updates its resolved target and keeps the link. Output is staged beside the target; overwrite stages are owner-only without inherited reader ACLs while content is written.
 - `export share` emits URLs that open in Mermaid Live Editor
 
 ## Running tests
@@ -74,10 +74,21 @@ python -m pytest cli_anything/mermaid/tests/ -v --tb=no
 ### Output file safety
 
 New render outputs follow the process umask. Existing-file overwrites use a
-same-directory staging file and preserve ownership, modes and access-control
-metadata on macOS and Linux before publication. A metadata-copy error leaves the
+same-directory owner-only staging file with inherited reader ACLs cleared, then
+preserve ownership, ordinary permissions, ACLs
+and labels on macOS and Linux before publication. Changed bytes never inherit
+setuid/setgid bits or Linux `security.capability`. A metadata-copy error leaves the
 original intact and returns a clean error. Directory-shaped paths ending in a
 separator are rejected before contacting the renderer.
+
+Multiply hard-linked outputs are refused, since replacing one directory entry
+would leave their aliases with old content. Destination identity and metadata
+are re-read after the renderer request and before publication: known inode
+replacement, creation/deletion, hard-link changes or a metadata change during
+copy cause an error; a newer mode observed before copying is preserved. These
+checks are best-effort detection, not an atomic compare-and-swap with rename;
+arbitrary concurrent writers can still race the final check and publication.
+Serialize output writers when that guarantee is required.
 
 Existing-file overwrite is refused before renderer access on other platforms,
 including Windows, because this backend cannot currently preserve their access

@@ -400,7 +400,7 @@ def test_render_temporary_is_restrictive_while_content_is_written(monkeypatch, t
         mermaid_backend.render_to_file("pako:x", str(target), "svg")
     finally:
         os.umask(previous)
-    assert observed == [mode]
+    assert observed == [0o600]
     assert stat.S_IMODE(target.stat().st_mode) == mode
     assert target.read_bytes() == b"private render"
 
