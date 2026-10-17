@@ -322,7 +322,10 @@ class TestQueueClear:
         with patch(
             "cli_anything.comfyui.utils.comfyui_backend.requests.post",
             return_value=response,
-        ) as mock_post:
+        ) as mock_post, patch(
+            "cli_anything.comfyui.utils.comfyui_backend.requests.delete",
+            side_effect=AssertionError("Queue clearing must use POST, not DELETE"),
+        ):
             queue_mod.clear_queue("http://localhost:8188")
 
         mock_post.assert_called_once_with(
