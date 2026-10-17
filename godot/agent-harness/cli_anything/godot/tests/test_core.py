@@ -308,6 +308,49 @@ class TestSceneAddNode:
         assert "Cannot verify scene hierarchy" in result["message"]
         assert scene.read_text() == before
 
+    @pytest.mark.parametrize("extension", ["glb", "gltf", "scn"])
+    def test_imported_scene_only_blocks_edits_inside_its_branch(self, tmp_project, extension):
+        from cli_anything.godot.core.scene import add_node
+
+        scene = tmp_project / "scenes" / "Imported.tscn"
+        (tmp_project / f"model.{extension}").write_bytes(b"\xff\x00binary")
+        before = (
+            f'[ext_resource type="PackedScene" path="res://model.{extension}" id="1"]\n'
+            '[node name="Root" type="Node3D"]\n'
+            '[node name="Model" parent="." instance=ExtResource("1")]\n'
+        )
+        scene.write_text(before)
+        assert add_node(str(tmp_project), "scenes/Imported.tscn", "Sibling", "Node", ".")["status"] == "ok"
+        published = scene.read_bytes()
+        assert add_node(str(tmp_project), "scenes/Imported.tscn", "Model", "Node", ".")["status"] == "error"
+        assert scene.read_bytes() == published
+        result = add_node(str(tmp_project), "scenes/Imported.tscn", "Child", "Node", "Model")
+        assert result["status"] == "error"
+        assert "Unsupported PackedScene format" in result["message"]
+        assert scene.read_bytes() == published
+
+    def test_nested_tscn_branch_ignores_unrelated_imported_descendants(self, tmp_project):
+        from cli_anything.godot.core.scene import add_node
+
+        nested = tmp_project / "scenes/Nested.tscn"
+        nested.write_text(
+            '[ext_resource type="PackedScene" path="res://missing.glb" id="1"]\n'
+            '[node name="Root" type="Node3D"]\n'
+            '[node name="Model" parent="." instance=ExtResource("1")]\n'
+            '[node name="Folder" type="Node" parent="."]\n'
+        )
+        scene = tmp_project / "scenes/Outer.tscn"
+        scene.write_text(
+            '[ext_resource type="PackedScene" path="res://scenes/Nested.tscn" id="1"]\n'
+            '[node name="Root" type="Node"]\n'
+            '[node name="Sub" parent="." instance=ExtResource("1")]\n'
+        )
+        assert add_node(str(tmp_project), "scenes/Outer.tscn", "Child", "Node", "Sub/Folder")["status"] == "ok"
+        before = scene.read_bytes()
+        assert add_node(str(tmp_project), "scenes/Outer.tscn", "Model", "Node", "Sub")["status"] == "error"
+        assert add_node(str(tmp_project), "scenes/Outer.tscn", "Child", "Node", "Sub/Model")["status"] == "error"
+        assert scene.read_bytes() == before
+
     def test_equivalent_parent_nodepaths_share_membership_and_duplicates(self, runner, tmp_project):
         from cli_anything.godot.core.scene import add_node
         assert self._add(runner, tmp_project, "Child", parent="./Player")["status"] == "ok"
