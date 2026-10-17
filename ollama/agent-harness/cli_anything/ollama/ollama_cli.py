@@ -308,7 +308,7 @@ def generate_chat(model_name, messages_input, messages_file, no_stream, temperat
             _host, model_name, messages,
             options=options or None, stream=False,
         )
-        if not _json_output and "message" in result:
+        if "message" in result:
             _chat_history = messages + [result["message"]]
         output(result)
     else:

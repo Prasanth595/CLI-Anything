@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
 
 from cli_anything.ollama.ollama_cli import cli, _format_size
+from cli_anything.ollama import ollama_cli as cli_module
 from cli_anything.ollama.utils.ollama_backend import DEFAULT_BASE_URL
 
 
@@ -460,6 +461,71 @@ class TestGenerateTextCommands:
 # ── Generate chat with mocked API ────────────────────────────────
 
 class TestGenerateChatCommands:
+    @pytest.mark.parametrize("first_json,followup_json", [
+        (True, True), (True, False), (False, True), (False, False),
+    ])
+    def test_continue_chat_retains_history_across_output_modes(
+        self, runner, monkeypatch, first_json, followup_json
+    ):
+        monkeypatch.setattr(cli_module, "_chat_history", [])
+        first_user = {"role": "user", "content": "Remember the number 42"}
+        first_reply = {"role": "assistant", "content": "I will remember 42"}
+        second_user = {"role": "user", "content": "What number did I give you?"}
+        second_reply = {"role": "assistant", "content": "42"}
+        first_response = {"message": first_reply, "done": True}
+        second_response = {"message": second_reply, "done": True}
+
+        with patch(
+            "cli_anything.ollama.core.generate.api_post",
+            side_effect=[first_response, second_response],
+        ) as mock_api:
+            first = runner.invoke(cli, [
+                *(["--json"] if first_json else []),
+                "generate", "chat", "--model", "test-model",
+                "--message", f"user:{first_user['content']}", "--no-stream",
+            ])
+            assert first.exit_code == 0, first.output
+            if first_json:
+                assert json.loads(first.output) == first_response
+
+            history = runner.invoke(cli, ["--json", "session", "history"])
+            assert history.exit_code == 0
+            assert json.loads(history.output)["messages"] == [first_user, first_reply]
+
+            followup = runner.invoke(cli, [
+                *(["--json"] if followup_json else []),
+                "generate", "chat", "--model", "test-model",
+                "--message", f"user:{second_user['content']}",
+                "--continue-chat", "--no-stream",
+            ])
+            assert followup.exit_code == 0, followup.output
+            if followup_json:
+                assert json.loads(followup.output) == second_response
+            assert mock_api.call_args.args[2]["messages"] == [
+                first_user, first_reply, second_user,
+            ]
+
+        assert cli_module._chat_history == [
+            first_user, first_reply, second_user, second_reply,
+        ]
+
+    @pytest.mark.parametrize("use_json", [False, True])
+    def test_failed_chat_preserves_previous_history(self, runner, monkeypatch, use_json):
+        previous = [{"role": "user", "content": "Keep this conversation"}]
+        monkeypatch.setattr(cli_module, "_chat_history", previous)
+        with patch(
+            "cli_anything.ollama.core.generate.api_post",
+            side_effect=RuntimeError("Cannot connect to Ollama"),
+        ):
+            result = runner.invoke(cli, [
+                *(["--json"] if use_json else []),
+                "generate", "chat", "--model", "test-model",
+                "--message", "user:Try again", "--continue-chat", "--no-stream",
+            ])
+
+        assert result.exit_code == 1
+        assert cli_module._chat_history == previous
+
     @patch("cli_anything.ollama.core.generate.api_post")
     def test_chat_no_stream_json(self, mock_api, runner):
         mock_api.return_value = {
