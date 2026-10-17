@@ -62,6 +62,11 @@ def test_required_fields_and_contributors_shape(fname):
                 assert isinstance(c[field], str) and c[field].strip(), (
                     f"{c.get('name')}: {field} must be nonblank text"
                 )
+        for field in ("install_cmd", "detect_cmd", "uninstall_cmd", "update_cmd"):
+            if field in c:
+                assert isinstance(c[field], str) and c[field].strip(), (
+                    f"{c.get('name')}: {field} must be nonblank text"
+                )
         strategy = _install_strategy(dict(c, _source=source))
         optional = {"install_cmd"} if source == "public" and strategy in {"npm", "bundled"} else set()
         missing = REQUIRED - c.keys() - optional
@@ -86,6 +91,10 @@ def test_required_fields_and_contributors_shape(fname):
         if "install_cmd" not in optional:
             assert isinstance(c["install_cmd"], str) and c["install_cmd"].strip(), (
                 f"{c['name']} requires an install command for {strategy}"
+            )
+        if strategy == "pip":
+            assert c["install_cmd"].startswith("pip install ") and len(c["install_cmd"].split()) > 2, (
+                f"{c['name']}: pip strategy requires a pip install command"
             )
         if strategy == "npm":
             assert isinstance(c.get("npm_package"), str) and c["npm_package"].strip(), (
@@ -357,3 +366,52 @@ def test_entry_points_cannot_collide_for_differently_named_entries(monkeypatch, 
                         else ([] if same_registry else [second]))
     with pytest.raises(AssertionError, match="entry_point"):
         test_names_unique_across_registries()
+
+
+@pytest.mark.parametrize("fname", ["registry.json", "public_registry.json"])
+@pytest.mark.parametrize("field", ["detect_cmd", "uninstall_cmd", "update_cmd"])
+@pytest.mark.parametrize("value", [7, True, [], {}, None, "", "  "])
+def test_present_optional_commands_require_nonblank_text(monkeypatch, fname, field, value):
+    import sys
+    entry = dict(_load(fname)[0], **{field: value})
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match=field):
+        test_required_fields_and_contributors_shape(fname)
+
+
+@pytest.mark.parametrize("command", [
+    "cd sketch/agent-harness && npm install && npm link",
+    "cargo install --git https://example.com/browser.git",
+    "npm install tool", "python -m pip install tool", "pip install",
+])
+def test_pip_strategy_requires_its_supported_command_prefix(monkeypatch, command):
+    import sys
+    entry = dict(_load("registry.json")[0], install_strategy="pip", install_cmd=command)
+    monkeypatch.setattr(sys.modules[__name__], "_load", lambda _: [entry])
+    with pytest.raises(AssertionError, match="pip install"):
+        test_required_fields_and_contributors_shape("registry.json")
+
+
+@pytest.mark.parametrize("name", ["sketch", "clibrowser"])
+def test_non_pip_registry_commands_use_real_generic_dispatch(monkeypatch, name):
+    from subprocess import CompletedProcess
+    from cli_hub import installer
+    entry = next(c for c in _load("registry.json") if c["name"] == name)
+    commands = []
+    def record_process(command, **options):
+        commands.append((command, options))
+        return CompletedProcess(command, 0, "", "")
+    def forbidden_pip(*args):
+        raise AssertionError("non-pip install must not dispatch through pip")
+    monkeypatch.setattr(installer.subprocess, "run", record_process)
+    monkeypatch.setattr(installer, "_pip_install", forbidden_pip)
+    strategy, (success, _) = installer._perform_action(entry, "install")
+    assert strategy == "command"
+    assert success
+    expected = {
+        "sketch": ("cd sketch/agent-harness && npm install && npm link", True),
+        "clibrowser": (["cargo", "install", "--git", "https://github.com/allthingssecurity/clibrowser.git",
+                        "--tag", "v0.1.0", "--locked"], False),
+    }
+    command, shell = expected[name]
+    assert commands == [(command, {"capture_output": True, "text": True, "shell": shell})]
