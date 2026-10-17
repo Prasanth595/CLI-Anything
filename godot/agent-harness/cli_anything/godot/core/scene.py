@@ -81,14 +81,15 @@ def read_scene(project_path: str, scene_path: str) -> dict:
                 current_attrs = {}
             continue
 
-        if line.startswith("[") and line.endswith("]"):
+        try:
+            header = _parse_section_header(line)
+        except ValueError as exc:
+            return {"status": "error", "message": f"Cannot parse scene header: {exc}"}
+        if header is not None:
             if current_section and current_attrs:
                 _store_section(current_section, current_attrs,
                                nodes, ext_resources, sub_resources, connections)
-            tag_content = line[1:-1]
-            parts = tag_content.split(None, 1)
-            current_section = parts[0]
-            current_attrs = _parse_tag_attrs(parts[1] if len(parts) > 1 else "")
+            current_section, current_attrs = header
             continue
 
         if "=" in line and current_section:
@@ -132,6 +133,24 @@ def add_node(
     if not full_path.exists():
         return {"status": "error", "message": f"Scene not found: {scene_path}"}
 
+    for label, value in (("node name", node_name), ("node type", node_type), ("parent", parent)):
+        if not value or any(c in value for c in '"\\\n\r'):
+            return {"status": "error", "message": f"Invalid {label}: {value!r}"}
+    if "/" in node_name:
+        return {"status": "error", "message": f"Invalid node name (contains '/'): {node_name!r}"}
+
+    # Resolve only branches that can contain the parent or new sibling.
+    try:
+        parent = _normalize_node_path(parent)
+        new_path = _normalize_node_path(node_name if parent == "." else f"{parent}/{node_name}")
+        paths = _scene_node_paths(Path(project_path).resolve(), full_path, set(), {parent, new_path})
+    except (OSError, ValueError) as exc:
+        return {"status": "error", "message": f"Cannot verify scene hierarchy: {exc}"}
+    if parent not in paths:
+        return {"status": "error", "message": f"Parent node not found in scene: {parent}"}
+    if new_path in paths:
+        return {"status": "error", "message": f"Node already exists: {new_path}"}
+
     node_line = f'\n[node name="{node_name}" type="{node_type}" parent="{parent}"]\n'
     with open(full_path, "a", encoding="utf-8") as f:
         f.write(node_line)
@@ -146,20 +165,161 @@ def add_node(
 
 # ---------- internal helpers ----------
 
+def _normalize_node_path(value: str) -> str:
+    """Canonical root-relative NodePath used for membership and duplicate checks."""
+    if value.startswith("/") or ":" in value:
+        raise ValueError(f"Expected a relative node path: {value!r}")
+    parts = []
+    for part in value.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError(f"Node path escapes the scene root: {value!r}")
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts) or "."
+
+
+def _scene_node_paths(
+    project_root: Path, scene_path: Path, ancestors: set[Path], queries: set[str],
+) -> set[str]:
+    """Resolve queried TSCN branches; reject unknown descendants without decoding them."""
+    import re
+    scene_path = scene_path.resolve()
+    if not scene_path.is_relative_to(project_root):
+        raise ValueError("PackedScene path escapes the project")
+    if scene_path in ancestors or len(ancestors) >= 64:
+        raise ValueError("Cyclic or too-deep PackedScene hierarchy")
+    if scene_path.suffix.lower() != ".tscn":
+        raise ValueError(f"Unsupported PackedScene format: {scene_path.suffix}")
+    ancestors = ancestors | {scene_path}
+    headers = [header for line in scene_path.read_text(encoding="utf-8").splitlines()
+               if (header := _parse_section_header(line.strip())) is not None]
+    resources = {attrs.get("id"): attrs for kind, attrs in headers if kind == "ext_resource"}
+    nodes = [attrs for kind, attrs in headers if kind == "node"]
+    if sum("parent" not in node for node in nodes) != 1:
+        raise ValueError("Scene must declare exactly one root node")
+    paths = set()
+    parents = []
+    for node in nodes:
+        name = node.get("name")
+        if not name:
+            raise ValueError("Scene node has no name")
+        parent = node.get("parent")
+        if parent is None:
+            node_path = "."
+        else:
+            parent = _normalize_node_path(parent)
+            node_path = _normalize_node_path(f"{parent}/{name}")
+        paths.add(node_path)
+        if parent is not None and any(query == node_path or query.startswith(node_path + "/") for query in queries):
+            parents.append(parent)
+        nested_queries = {
+            query if node_path == "." else query[len(node_path) + 1:]
+            for query in queries
+            if node_path == "." or query.startswith(node_path + "/")
+        }
+        if "instance" not in node or not nested_queries:
+            continue
+        match = re.fullmatch(r'ExtResource\s*\(\s*"((?:\\.|[^"\\])*)"\s*\)', node["instance"])
+        resource = resources.get(_decode_tag_string(match.group(1))) if match else None
+        if not resource or resource.get("type") != "PackedScene":
+            raise ValueError(f"Cannot resolve PackedScene instance at {node_path}")
+        resource_path = resource.get("path", "")
+        if not resource_path.startswith("res://"):
+            raise ValueError(f"Unsupported PackedScene path: {resource_path!r}")
+        inherited = _scene_node_paths(project_root, project_root / resource_path[6:], ancestors, nested_queries)
+        for child in inherited:
+            paths.add(node_path if child == "." else _normalize_node_path(f"{node_path}/{child}"))
+    if any(parent not in paths for parent in parents):
+        raise ValueError("Scene contains an unresolved parent node")
+    return paths
+
+
 def _generate_uid() -> str:
     """Generate a UID for scene files using uuid4 for uniqueness."""
     import uuid
     return uuid.uuid4().hex[:12]
 
 
+
+def _parse_section_header(line: str) -> tuple[str, dict] | None:
+    """Read a complete tag, retaining closing brackets inside quoted values."""
+    quoted = escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif quoted and char == "\\":
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif char == ";" and not quoted:
+            line = line[:index].rstrip()
+            break
+    if not (line.startswith("[") and line.endswith("]")):
+        return None
+    parts = line[1:-1].split(None, 1)
+    if not parts:
+        return None
+    return parts[0], _parse_tag_attrs(parts[1] if len(parts) > 1 else "")
+
+
+def _decode_tag_string(value: str) -> str:
+    """Decode Godot VariantParser strings, not Python literals or byte codecs.
+
+    Godot uses four-digit \\u and six-digit \\U escapes, accepts UTF-16 pairs,
+    and keeps the escaped character for unrecognized escape letters.
+    """
+    escapes = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r"}
+    result = []
+    index = 0
+    lead = None
+    while index < len(value):
+        char = value[index]
+        index += 1
+        if char == "\\":
+            if index == len(value):
+                raise ValueError("Unterminated escape in scene tag")
+            char = value[index]
+            index += 1
+            if char in ("u", "U"):
+                size = 4 if char == "u" else 6
+                digits = value[index:index + size]
+                if len(digits) != size or any(c not in "0123456789abcdefABCDEF" for c in digits):
+                    raise ValueError("Malformed Unicode escape in scene tag")
+                code = int(digits, 16)
+                index += size
+                if 0xD800 <= code <= 0xDBFF:
+                    if lead is not None:
+                        raise ValueError("Unpaired Unicode surrogate in scene tag")
+                    lead = code
+                    continue
+                if 0xDC00 <= code <= 0xDFFF:
+                    if lead is None:
+                        raise ValueError("Unpaired Unicode surrogate in scene tag")
+                    code = 0x10000 + ((lead - 0xD800) << 10) + code - 0xDC00
+                    lead = None
+                if code > 0x10FFFF:
+                    raise ValueError("Unicode escape outside valid range in scene tag")
+                char = chr(code)
+            else:
+                char = escapes.get(char, char)
+        if lead is not None:
+            raise ValueError("Unpaired Unicode surrogate in scene tag")
+        result.append(char)
+    if lead is not None:
+        raise ValueError("Unpaired Unicode surrogate in scene tag")
+    return "".join(result)
+
+
 def _parse_tag_attrs(attr_string: str) -> dict:
     """Parse tag attributes like 'name="Foo" type="Node2D"'."""
     attrs = {}
     import re
-    for match in re.finditer(r'(\w+)="([^"]*)"', attr_string):
-        attrs[match.group(1)] = match.group(2)
-    for match in re.finditer(r'(\w+)=(\d+)', attr_string):
-        attrs[match.group(1)] = match.group(2)
+    for match in re.finditer(r'(\w+)\s*=\s*(?:"((?:\\.|[^"\\])*)"|((?:ExtResource|SubResource)\s*\(\s*"[^"]*"\s*\)|[^\s]+))', attr_string):
+        attrs[match.group(1)] = _decode_tag_string(match.group(2)) if match.group(2) is not None else match.group(3)
     return attrs
 
 
