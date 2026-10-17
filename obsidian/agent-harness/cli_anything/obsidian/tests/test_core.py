@@ -235,6 +235,25 @@ class TestVaultModule:
             content="# Existing\nnew content"
         )
 
+    @patch("cli_anything.obsidian.core.vault.api_put")
+    @patch("cli_anything.obsidian.core.vault.api_get")
+    def test_note_paths_with_reserved_characters_are_percent_encoded(self, mock_get, mock_put):
+        from cli_anything.obsidian.core.vault import create_note, list_files, read_note
+        mock_get.return_value = {"content": ""}
+        mock_put.return_value = {"status": "ok"}
+        read_note("https://localhost:27124", "test-key", "notes/C#cheatsheet.md")
+        read_note("https://localhost:27124", "test-key", "/notes/What?.md")
+        create_note("https://localhost:27124", "test-key", "100% done.md", "x")
+        list_files("https://localhost:27124", "test-key", path="Q&A #1")
+        assert [c.args[1] for c in mock_get.call_args_list] == [
+            "/vault/notes/C%23cheatsheet.md",
+            "/vault/notes/What%3F.md",
+            "/vault/Q%26A%20%231/",
+        ]
+        mock_put.assert_called_once_with(
+            "https://localhost:27124", "/vault/100%25%20done.md", "test-key", content="x"
+        )
+
 
 class TestSearchModule:
     @patch("cli_anything.obsidian.core.search.api_post_raw")
