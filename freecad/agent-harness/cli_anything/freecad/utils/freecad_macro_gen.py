@@ -158,6 +158,36 @@ def _render_spec_for_part(project: dict, part: Dict[str, Any]) -> Optional[Dict[
     return None
 
 
+# Part types that ``parts.boolean_op`` stores in ``project["parts"]``.
+_BOOLEAN_PART_TYPES = {
+    "cut": "Part::Cut",
+    "fuse": "Part::Fuse",
+    "common": "Part::Common",
+}
+
+
+def _emit_boolean_part(
+    lines: List[str], project: dict, part: Dict[str, Any], name: str
+) -> None:
+    """Emit the FreeCAD boolean object for a boolean-result part.
+
+    Its operands are referenced by ``base_id`` / ``tool_id`` and are always
+    earlier entries in ``project["parts"]``, so they already exist here.
+    """
+    params = part.get("params", {})
+    base = _part_by_id(project, params.get("base_id"))
+    tool = _part_by_id(project, params.get("tool_id"))
+    if base is None or tool is None:
+        lines.append(f"# WARNING: Missing operand for boolean part '{name}'")
+        return
+    fc_type = _BOOLEAN_PART_TYPES[str(part.get("type", "")).lower()]
+    base_name = _safe_name(base.get("name", ""))
+    tool_name = _safe_name(tool.get("name", ""))
+    lines.append(f"obj_{name} = doc.addObject('{fc_type}', '{name}')")
+    lines.append(f"obj_{name}.Base = doc.getObject('{base_name}')")
+    lines.append(f"obj_{name}.Tool = doc.getObject('{tool_name}')")
+
+
 def _gen_parts(project: dict) -> List[str]:
     """Generate Part primitives (Box, Cylinder, Sphere, Cone, Torus)."""
     lines: List[str] = []
@@ -171,6 +201,8 @@ def _gen_parts(project: dict) -> List[str]:
 
         if render_spec and _emit_primitive(lines, render_spec["type"], name, props):
             pass
+        elif part_type in _BOOLEAN_PART_TYPES:
+            _emit_boolean_part(lines, project, part, name)
         else:
             lines.append(f"# WARNING: Unknown part type '{part_type}' for '{name}'")
 
@@ -538,9 +570,14 @@ def _gen_export(
     lines.append("")
 
     # Collect all visible shape objects for export
-    lines.append("# Collect all shape objects for export")
+    # Only export final results: an object that another object consumes
+    # (a boolean operand, a PartDesign feature inside its Body) has a
+    # non-empty InList and is already part of that consumer's shape.
+    lines.append("# Collect the final shape objects for export")
     lines.append("export_objects = []")
     lines.append("for obj in doc.Objects:")
+    lines.append("    if obj.InList:")
+    lines.append("        continue")
     lines.append("    if hasattr(obj, 'Shape') and obj.Shape.isValid():")
     lines.append("        export_objects.append(obj)")
     lines.append("")

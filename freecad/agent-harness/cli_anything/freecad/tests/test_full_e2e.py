@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import os
 import struct
 import subprocess
@@ -62,6 +63,7 @@ from cli_anything.freecad.core.body import (
     revolution,
     list_bodies,
     polar_pattern,
+    subtractive_cylinder,
 )
 from cli_anything.freecad.core.materials import (
     create_material,
@@ -177,9 +179,39 @@ def _resolve_cli(name: str) -> List[str]:
 # 1. Intermediate-file tests (no FreeCAD required)
 # =========================================================================
 
+def _binary_stl_volume(path: str) -> float:
+    """Volume enclosed by a binary STL (sum of signed tetrahedra)."""
+    with open(path, "rb") as f:
+        f.seek(80)
+        (count,) = struct.unpack("<I", f.read(4))
+        total = 0.0
+        for _ in range(count):
+            vals = struct.unpack("<12fH", f.read(50))
+            a, b, c = vals[3:6], vals[6:9], vals[9:12]
+            total += (
+                a[0] * (b[1] * c[2] - b[2] * c[1])
+                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0])
+            ) / 6.0
+    return abs(total)
+
+
 class TestIntermediateFiles:
     """Verify project creation, manipulation, and macro generation
     using only the Python API -- no FreeCAD binary needed."""
+
+    def test_boolean_part_emits_freecad_boolean(self):
+        """``part boolean`` stores its result in parts; the macro must build it."""
+        proj = create_document(name="BoolMacro")
+        add_part(proj, "box", name="Base", params={"length": 40, "width": 30, "height": 20})
+        add_part(proj, "cylinder", name="Hole", params={"radius": 6, "height": 30})
+        boolean_op(proj, "cut", 0, 1, name="Bracket")
+
+        macro = generate_macro(proj, "/tmp/out.stl", "stl")
+        assert "obj_Bracket = doc.addObject('Part::Cut', 'Bracket')" in macro
+        assert "obj_Bracket.Base = doc.getObject('Base')" in macro
+        assert "obj_Bracket.Tool = doc.getObject('Hole')" in macro
+        assert "Unknown part type 'cut'" not in macro
 
     def test_full_project_json_structure(self, tmp_path):
         """Create a complex project and verify the JSON schema."""
@@ -617,6 +649,33 @@ class TestFreeCADBackend:
 
         fmt = "ASCII" if is_ascii else "binary"
         print(f"\n  STL ({fmt}): {output} ({size:,} bytes)")
+
+    def test_export_boolean_cut_stl_is_the_cut_solid(self, tmp_path):
+        """The exported mesh is box minus cylinder, not the two operands."""
+        proj = create_document(name="CutExport")
+        add_part(proj, "box", name="Base", params={"length": 40, "width": 30, "height": 20})
+        add_part(proj, "cylinder", name="Hole", params={"radius": 6, "height": 30},
+                 position=[20, 15, -5])
+        boolean_op(proj, "cut", 0, 1, name="Bracket")
+
+        output = str(tmp_path / "cut.stl")
+        export_project(proj, output, preset="stl")
+
+        expected = 40 * 30 * 20 - math.pi * 6 ** 2 * 20
+        assert _binary_stl_volume(output) == pytest.approx(expected, rel=0.01)
+
+    def test_export_body_stl_excludes_intermediate_features(self, tmp_path):
+        """Only the Body's final shape is exported, not each feature's solid."""
+        proj = create_document(name="BodyExport")
+        create_body(proj, name="Body")
+        additive_box(proj, 0, length=40, width=30, height=20)
+        subtractive_cylinder(proj, 0, radius=6, height=30, position=[20, 15, -5])
+
+        output = str(tmp_path / "body.stl")
+        export_project(proj, output, preset="stl")
+
+        expected = 40 * 30 * 20 - math.pi * 6 ** 2 * 20
+        assert _binary_stl_volume(output) == pytest.approx(expected, rel=0.01)
 
     def test_export_fcstd(self, tmp_path):
         """Export to native FCStd format."""
