@@ -178,4 +178,4 @@ python -m pytest cli_anything/ollama/tests/ -v                     # All tests
 
 ## Version
 
-1.0.1
+1.0.2
