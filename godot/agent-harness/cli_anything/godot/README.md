@@ -58,6 +58,10 @@ cli-anything-godot -p ./my-game session
 | `engine` | version, status | Engine info |
 | `session` | (REPL) | Interactive mode |
 
+Scene hierarchy checks accept trailing semicolon comments and decode Godot string
+escapes in node names, parent paths, and PackedScene references. Existing scene
+content is preserved when a node is appended; a rejected addition writes nothing.
+
 ## Security Note
 
 The `script inline` command writes user-provided GDScript to a temp file and executes it via Godot subprocess. This runs arbitrary code on the host — only use with trusted input.
