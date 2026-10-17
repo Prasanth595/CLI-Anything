@@ -70,3 +70,16 @@ cli-anything-mermaid --project diagram.mermaid.json
 cd mermaid/agent-harness
 python -m pytest cli_anything/mermaid/tests/ -v --tb=no
 ```
+
+### Output file safety
+
+New render outputs follow the process umask. Existing-file overwrites use a
+same-directory staging file and preserve ownership, modes and access-control
+metadata on macOS and Linux before publication. A metadata-copy error leaves the
+original intact and returns a clean error. Directory-shaped paths ending in a
+separator are rejected before contacting the renderer.
+
+Existing-file overwrite is refused before renderer access on other platforms,
+including Windows, because this backend cannot currently preserve their access
+controls. Creating a new output remains supported. Native Windows overwrite
+qualification is not claimed.

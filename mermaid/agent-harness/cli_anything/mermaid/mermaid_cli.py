@@ -211,7 +211,7 @@ REPL_COMMANDS = {
 def repl() -> None:
     """Interactive REPL."""
     session = get_session()
-    skin = ReplSkin("mermaid", version="1.0.0")
+    skin = ReplSkin("mermaid", version="1.0.1")
     skin.print_banner()
     prompt_session = skin.create_prompt_session()
     while True:
