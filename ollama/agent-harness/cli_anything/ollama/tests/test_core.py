@@ -121,6 +121,45 @@ class TestFormatSize:
 # ── CLI argument parsing ─────────────────────────────────────────
 
 class TestCLIParsing:
+    def test_release_versions_match_package_metadata(self):
+        import ast
+        import re
+        from pathlib import Path
+
+        harness_root = Path(__file__).resolve().parents[3]
+        package_root = harness_root / "cli_anything" / "ollama"
+        setup_tree = ast.parse((harness_root / "setup.py").read_text(encoding="utf-8"))
+        version = next(
+            node.value.value for node in ast.walk(setup_tree)
+            if isinstance(node, ast.keyword) and node.arg == "version"
+        )
+        cli_tree = ast.parse((package_root / "ollama_cli.py").read_text(encoding="utf-8"))
+        repl_versions = [
+            keyword.value.value
+            for node in ast.walk(cli_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ReplSkin"
+            for keyword in node.keywords if keyword.arg == "version"
+        ]
+        assert repl_versions == [version]
+
+        version_docs = [package_root / "README.md", package_root / "skills" / "SKILL.md"]
+        repo_root = harness_root.parents[1]
+        canonical_skill = repo_root / "skills" / "cli-anything-ollama" / "SKILL.md"
+        if canonical_skill.exists():
+            version_docs.append(canonical_skill)
+        for document in version_docs:
+            match = re.search(
+                r"(?m)^## Version\s*\n\s*(\S+)", document.read_text(encoding="utf-8")
+            )
+            assert match and match.group(1) == version, str(document)
+
+        registry_path = repo_root / "registry.json"
+        if registry_path.exists():
+            entries = json.loads(registry_path.read_text(encoding="utf-8"))["clis"]
+            assert next(item["version"] for item in entries if item["name"] == "ollama") == version
+
     def test_help(self, runner):
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
@@ -537,6 +576,44 @@ class TestGenerateChatCommands:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["message"]["content"] == "4"
+
+    @pytest.mark.parametrize("default_encoding", ["cp1252", "ascii"])
+    @patch("cli_anything.ollama.core.generate.api_post")
+    def test_chat_file_preserves_utf8_under_legacy_default(
+        self, mock_api, runner, tmp_path, default_encoding
+    ):
+        messages = [{"role": "user", "content": "你好，café ☕"}]
+        messages_file = tmp_path / "messages.json"
+        messages_file.write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8"
+        )
+        response = {
+            "message": {"role": "assistant", "content": "收到"},
+            "done": True,
+        }
+        mock_api.return_value = response
+        original_open = open
+
+        def open_with_legacy_default(file, mode="r", *args, **kwargs):
+            # Simulate a non-UTF-8 locale only for this input file. An explicit
+            # encoding must take precedence over the platform default.
+            if (
+                file == str(messages_file)
+                and "b" not in mode
+                and kwargs.get("encoding") is None
+            ):
+                kwargs["encoding"] = default_encoding
+            return original_open(file, mode, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=open_with_legacy_default):
+            result = runner.invoke(cli, [
+                "--json", "generate", "chat", "--model", "test-model",
+                "--file", str(messages_file), "--no-stream",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == response
+        assert mock_api.call_args.args[2]["messages"] == messages
 
     def test_chat_missing_model(self, runner):
         result = runner.invoke(cli, ["generate", "chat",

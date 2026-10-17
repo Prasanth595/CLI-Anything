@@ -548,7 +548,7 @@
     {
       "name": "ollama",
       "display_name": "Ollama",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Local LLM inference and model management via Ollama REST API",
       "requires": "Ollama running at http://localhost:11434",
       "homepage": "https://ollama.com",
