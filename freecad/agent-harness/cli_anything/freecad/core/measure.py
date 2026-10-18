@@ -10,7 +10,12 @@ import math
 from typing import Any, Dict, List, Optional
 
 from cli_anything.freecad.core.document import ensure_collection
-from cli_anything.freecad.core.parts import PRIMITIVES, get_part
+from cli_anything.freecad.core.parts import (
+    PRIMITIVES,
+    _rotation_matrix,
+    _transform_point,
+    get_part,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,51 +51,87 @@ def _get_position(part: Dict[str, Any]) -> List[float]:
     return list(part["placement"]["position"])
 
 
-def _bbox_center(part: Dict[str, Any]) -> List[float]:
-    """Estimate the bounding-box centre of a part from its position and params."""
-    pos = _get_position(part)
+def _local_bbox_center(part: Dict[str, Any]) -> List[float]:
+    """Return the bounding-box centre in the part frame, before placement.
+
+    A box and a wedge start at a corner, a cylinder and a cone are centred
+    on +Z with the base at the origin, and a sphere and a torus are centred
+    on the origin. Unknown parts have no local offset.
+    """
     p = part["params"]
     t = part["type"]
 
     if t == "box":
         return [
-            pos[0] + p["length"] / 2.0,
-            pos[1] + p["width"] / 2.0,
-            pos[2] + p["height"] / 2.0,
+            p["length"] / 2.0,
+            p["width"] / 2.0,
+            p["height"] / 2.0,
         ]
     elif t == "cylinder":
-        r = p["radius"]
-        return [
-            pos[0] + r,
-            pos[1] + r,
-            pos[2] + p["height"] / 2.0,
-        ]
+        return [0.0, 0.0, p["height"] / 2.0]
     elif t == "sphere":
-        r = p["radius"]
-        return [pos[0] + r, pos[1] + r, pos[2] + r]
+        return [0.0, 0.0, 0.0]
     elif t == "cone":
-        r = max(p["radius1"], p["radius2"])
-        return [
-            pos[0] + r,
-            pos[1] + r,
-            pos[2] + p["height"] / 2.0,
-        ]
+        return [0.0, 0.0, p["height"] / 2.0]
     elif t == "torus":
-        R = p["radius1"]
-        r = p["radius2"]
-        return [
-            pos[0] + R + r,
-            pos[1] + R + r,
-            pos[2] + r,
-        ]
+        return [0.0, 0.0, 0.0]
     elif t == "wedge":
         return [
-            pos[0] + (p["xmin"] + p["xmax"]) / 2.0,
-            pos[1] + (p["ymin"] + p["ymax"]) / 2.0,
-            pos[2] + (p["zmin"] + p["zmax"]) / 2.0,
+            (p["xmin"] + p["xmax"]) / 2.0,
+            (p["ymin"] + p["ymax"]) / 2.0,
+            (p["zmin"] + p["zmax"]) / 2.0,
         ]
-    # Boolean or unknown — fall back to placement position
-    return pos
+    return [0.0, 0.0, 0.0]
+
+
+def _bbox_center(part: Dict[str, Any]) -> List[float]:
+    """Estimate the bounding-box centre of a part in world coordinates.
+
+    Placement follows the same local frames as ``measure_bounding_box``:
+    a box and a wedge start at a corner, a cylinder and a cone are centred
+    on +Z with the base at the placement, and a sphere and a torus are
+    centred on the placement. The local offset is rotated by the placement
+    before the placement position is added, using ``_transform_point``
+    (``FreeCAD.Rotation(rz, ry, rx)``).
+    """
+    pos = _get_position(part)
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    return _transform_point(_local_bbox_center(part), rotation, pos)
+
+
+def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
+    """Centre of mass of a uniform-density primitive in world coordinates.
+
+    Local offsets use the same part frames as ``_local_bbox_center``. A
+    conical frustum is the one primitive whose centroid is not the
+    bounding-box centre. Measured from the radius1 face along +Z:
+
+        z = H * (R1**2 + 2*R1*R2 + 3*R2**2) / (4 * (R1**2 + R1*R2 + R2**2))
+
+    A zero-radius cone (both radii 0) falls back to the segment midpoint.
+    Revolution angles are ignored, matching ``_compute_volume``.
+
+    The local offset is rotated by the placement before the placement
+    position is added, using the same XYZ Euler convention as
+    ``_transform_point`` (``FreeCAD.Rotation(rz, ry, rx)``).
+    """
+    pos = _get_position(part)
+    if part["type"] == "cone":
+        p = part["params"]
+        r1 = float(p["radius1"])
+        r2 = float(p["radius2"])
+        height = float(p["height"])
+        denom = r1 * r1 + r1 * r2 + r2 * r2
+        if denom == 0.0:
+            z_offset = height / 2.0
+        else:
+            z_offset = height * (r1 * r1 + 2.0 * r1 * r2 + 3.0 * r2 * r2) / (4.0 * denom)
+        local = [0.0, 0.0, z_offset]
+    else:
+        local = _local_bbox_center(part)
+
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    return _transform_point(local, rotation, pos)
 
 
 # ---------------------------------------------------------------------------
@@ -517,10 +558,11 @@ def measure_center_of_mass(
     project: Dict[str, Any], index: int,
     additive: bool = False,
 ) -> Dict[str, Any]:
-    """Estimate the centre of mass (geometric centre for simple shapes).
+    """Estimate the centre of mass of a uniform-density part.
 
-    For uniform-density primitives the centre of mass coincides with the
-    bounding-box centre.
+    Sphere, cylinder, box, wedge, and torus centroids coincide with the
+    bounding-box centre. A cone does not: its centroid lies on the axis,
+    at the solid-frustum position measured from the radius1 face.
 
     Returns
     -------
@@ -528,7 +570,7 @@ def measure_center_of_mass(
         Measurement record with ``center_of_mass`` ``[x, y, z]``.
     """
     part = get_part(project, index)
-    com = _bbox_center(part)
+    com = _uniform_center_of_mass(part)
 
     result_com: Dict[str, Any] = {
         "part_index": index,
@@ -539,14 +581,97 @@ def measure_center_of_mass(
     return _store_measurement(project, "center_of_mass", result_com)
 
 
+def _curved_local_support(
+    part_type: str,
+    params: Dict[str, Any],
+    direction: List[float],
+) -> float:
+    """Support of a curved primitive along a local direction.
+
+    Sphere, cylinder, cone, and torus are solids of revolution about
+    local +Z. The value is the maximum of direction dot point over the solid.
+    ``direction`` does not need to be a unit vector. A cone is the convex
+    hull of the radius1 disk at ``z = 0`` and the radius2 disk at
+    ``z = height``.
+    """
+    ux = float(direction[0])
+    uy = float(direction[1])
+    uz = float(direction[2])
+    radial = math.hypot(ux, uy)
+    if part_type == "sphere":
+        return float(params["radius"]) * math.hypot(ux, uy, uz)
+    if part_type == "cylinder":
+        axial = float(params["height"]) * uz if uz > 0.0 else 0.0
+        return float(params["radius"]) * radial + axial
+    if part_type == "cone":
+        base = float(params["radius1"]) * radial
+        cap = float(params["radius2"]) * radial + float(params["height"]) * uz
+        return max(base, cap)
+    if part_type == "torus":
+        major = float(params["radius1"])
+        minor = float(params["radius2"])
+        return major * radial + minor * math.hypot(ux, uy, uz)
+    raise ValueError(f"not a curved primitive: {part_type}")
+
+
+def _curved_support_aabb(part: Dict[str, Any]) -> tuple:
+    """World axis-aligned bounds from curved-primitive support extents.
+
+    World axis ``i`` is row ``i`` of the placement rotation. The max is the
+    support of that row and the min is the negated support of the opposite
+    row, then the placement position is added. The local box corners are
+    not rotated: they lie outside the solid.
+    """
+    pos = _get_position(part)
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    matrix = _rotation_matrix(rotation)
+    part_type = part["type"]
+    params = part["params"]
+    bb_min: List[float] = []
+    bb_max: List[float] = []
+    for axis in range(3):
+        row = matrix[axis]
+        opposite = [-component for component in row]
+        bb_max.append(pos[axis] + _curved_local_support(part_type, params, row))
+        bb_min.append(
+            pos[axis] - _curved_local_support(part_type, params, opposite)
+        )
+    return bb_min, bb_max
+
+def _rotated_aabb(
+    part: Dict[str, Any],
+    local_min: List[float],
+    local_max: List[float],
+) -> tuple:
+    """Axis-aligned bounds of a local box after the placement rotation.
+
+    Corners are rotated with ``_transform_point`` about the placement, then
+    the world-axis min and max are taken. An identity rotation leaves the
+    translated local box unchanged.
+    """
+    pos = _get_position(part)
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    corners = [
+        _transform_point([x, y, z], rotation, pos)
+        for x in (local_min[0], local_max[0])
+        for y in (local_min[1], local_max[1])
+        for z in (local_min[2], local_max[2])
+    ]
+    bb_min = [min(corner[axis] for corner in corners) for axis in range(3)]
+    bb_max = [max(corner[axis] for corner in corners) for axis in range(3)]
+    return bb_min, bb_max
+
+
 def measure_bounding_box(
     project: Dict[str, Any], index: int,
     additive: bool = False,
 ) -> Dict[str, Any]:
     """Compute the axis-aligned bounding box of a part.
 
-    The bounding box is derived from the part's position and primitive
-    parameters.
+    Box and wedge bounds rotate the corners of the local box. Sphere,
+    cylinder, cone, and torus bounds are support extents of the solid in
+    the placement frame, so a non-axis-aligned rotation does not inflate
+    the box to those corners.
 
     Returns
     -------
@@ -554,45 +679,21 @@ def measure_bounding_box(
         Measurement record with ``min``, ``max``, and ``size`` vectors.
     """
     part = get_part(project, index)
-    pos = _get_position(part)
     p = part["params"]
     t = part["type"]
 
-    if t == "box":
-        bb_min = pos[:]
-        bb_max = [
-            pos[0] + p["length"],
-            pos[1] + p["width"],
-            pos[2] + p["height"],
-        ]
-    elif t == "cylinder":
-        r = p["radius"]
-        bb_min = [pos[0] - r, pos[1] - r, pos[2]]
-        bb_max = [pos[0] + r, pos[1] + r, pos[2] + p["height"]]
-    elif t == "sphere":
-        r = p["radius"]
-        bb_min = [pos[0] - r, pos[1] - r, pos[2] - r]
-        bb_max = [pos[0] + r, pos[1] + r, pos[2] + r]
-    elif t == "cone":
-        r = max(p["radius1"], p["radius2"])
-        bb_min = [pos[0] - r, pos[1] - r, pos[2]]
-        bb_max = [pos[0] + r, pos[1] + r, pos[2] + p["height"]]
-    elif t == "torus":
-        R, r = p["radius1"], p["radius2"]
-        outer = R + r
-        bb_min = [pos[0] - outer, pos[1] - outer, pos[2] - r]
-        bb_max = [pos[0] + outer, pos[1] + outer, pos[2] + r]
+    if t in ("sphere", "cylinder", "cone", "torus"):
+        bb_min, bb_max = _curved_support_aabb(part)
+    elif t == "box":
+        bb_min, bb_max = _rotated_aabb(
+            part, [0.0, 0.0, 0.0], [p["length"], p["width"], p["height"]],
+        )
     elif t == "wedge":
-        bb_min = [
-            pos[0] + p["xmin"],
-            pos[1] + p["ymin"],
-            pos[2] + p["zmin"],
-        ]
-        bb_max = [
-            pos[0] + p["xmax"],
-            pos[1] + p["ymax"],
-            pos[2] + p["zmax"],
-        ]
+        bb_min, bb_max = _rotated_aabb(
+            part,
+            [p["xmin"], p["ymin"], p["zmin"]],
+            [p["xmax"], p["ymax"], p["zmax"]],
+        )
     else:
         # Unknown / boolean — deferred
         result_bb_def: Dict[str, Any] = {
